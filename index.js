@@ -1,656 +1,458 @@
-const { Telegraf, Markup } = require('telegraf');
-const { Pool } = require('pg');
-const express = require('express');
-
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const PORT = process.env.PORT || 3000;
-
-const bot = new Telegraf(BOT_TOKEN);
-
-// Подключение к Supabase PostgreSQL
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
-});
-
-// --- АВТОМАТИЧЕСКАЯ ИНИЦИАЛИЗАЦИЯ ТАБЛИЦ B SUPABASE ---
-async function initDB() {
-    try {
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS pushups (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                username TEXT,
-                count INT NOT NULL,
-                exercise TEXT DEFAULT 'pushups',
-                type TEXT DEFAULT 'classic',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS settings (
-                user_id BIGINT PRIMARY KEY,
-                start_time TEXT DEFAULT '09:00',
-                end_time TEXT DEFAULT '21:00',
-                frequency INT DEFAULT 3,
-                daily_goal INT DEFAULT 100,
-                is_paused INT DEFAULT 0,
-                next_reminder TIMESTAMP WITH TIME ZONE
-            );
-        `);
-        console.log('✅ База данных Supabase готова к работе!');
-    } catch (e) {
-        console.error('❌ Ошибка инициализации БД:', e);
-    }
-}
-
-initDB();
-
-// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-async function getUserSettings(userId) {
-    try {
-        const res = await pool.query('SELECT * FROM settings WHERE user_id = $1', [userId]);
-        if (res.rows.length === 0) {
-            const defaultSet = { user_id: userId, start_time: '09:00', end_time: '21:00', frequency: 3, daily_goal: 100, is_paused: 0 };
-            await pool.query(
-                `INSERT INTO settings (user_id, start_time, end_time, frequency, daily_goal, is_paused) 
-                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (user_id) DO NOTHING`,
-                [userId, '09:00', '21:00', 3, 100, 0]
-            );
-            return defaultSet;
-        }
-        return res.rows[0];
-    } catch (e) {
-        console.error('Ошибка получения настроек:', e);
-        return { start_time: '09:00', end_time: '21:00', frequency: 3, daily_goal: 100, is_paused: 0 };
-    }
-}
-
-async function logExercise(userId, username, count, exercise = 'pushups', type = 'classic') {
-    await pool.query(
-        `INSERT INTO pushups (user_id, username, count, exercise, type) VALUES ($1, $2, $3, $4, $5)`,
-        [userId, username || 'Аноним', parseInt(count), exercise, type]
-    );
-}
-
-const app = express();
-app.use(express.json());
-
-// --- API ENDPOINTS ---
-app.post('/api/pushups', async (req, res) => {
-    const { user_id, username, count, exercise, type } = req.body;
-    if (!user_id || !count) return res.status(400).json({ error: 'Неверные данные' });
-
-    try {
-        await logExercise(user_id, username, count, exercise, type);
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.get('/api/user-summary', async (req, res) => {
-    const userId = req.query.user_id;
-    if (!userId) return res.status(400).json({ error: 'No user_id' });
-
-    try {
-        const settings = await getUserSettings(userId);
-        
-        const todayRes = await pool.query(
-            `SELECT COALESCE(SUM(count), 0) as today_total FROM pushups WHERE user_id = $1 AND created_at >= CURRENT_DATE`,
-            [userId]
-        );
-        const totalRes = await pool.query(
-            `SELECT COALESCE(SUM(count), 0) as total_all, COALESCE(MAX(count), 0) as max_set FROM pushups WHERE user_id = $1`,
-            [userId]
-        );
-
-        res.json({
-            today: parseInt(todayRes.rows[0]?.today_total || 0),
-            total: parseInt(totalRes.rows[0]?.total_all || 0),
-            max_set: parseInt(totalRes.rows[0]?.max_set || 0),
-            settings: settings
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.get('/api/heatmap', async (req, res) => {
-    const userId = req.query.user_id;
-    try {
-        const result = await pool.query(
-            `SELECT DATE(created_at) as day, SUM(count) as total 
-             FROM pushups 
-             WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '29 days'
-             GROUP BY DATE(created_at)`,
-            [userId]
-        );
-        res.json(result.rows || []);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.get('/api/export', async (req, res) => {
-    const userId = req.query.user_id;
-    try {
-        const result = await pool.query(
-            `SELECT created_at, exercise, type, count FROM pushups WHERE user_id = $1 ORDER BY created_at DESC`,
-            [userId]
-        );
-        let csv = 'Дата,Упражнение,Тип,Количество\n';
-        (result.rows || []).forEach(r => {
-            csv += `"${r.created_at}","${r.exercise}","${r.type}",${r.count}\n`;
-        });
-        res.setHeader('Content-Type', 'text/csv');
-        res.setHeader('Content-Disposition', 'attachment; filename="workout_history.csv"');
-        res.send(csv);
-    } catch (err) {
-        res.status(500).send('Ошибка экспорта');
-    }
-});
-
-app.post('/api/settings', async (req, res) => {
-    const { user_id, start_time, end_time, frequency, daily_goal, is_paused } = req.body;
-    try {
-        await pool.query(
-            `INSERT INTO settings (user_id, start_time, end_time, frequency, daily_goal, is_paused)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (user_id) DO UPDATE SET
-                start_time = EXCLUDED.start_time,
-                end_time = EXCLUDED.end_time,
-                frequency = EXCLUDED.frequency,
-                daily_goal = EXCLUDED.daily_goal,
-                is_paused = EXCLUDED.is_paused`,
-            [user_id, start_time, end_time, parseInt(frequency), parseInt(daily_goal), is_paused ? 1 : 0]
-        );
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// --- iOS MATTE GLASS HTML ИНТЕРФЕЙС ---
-const htmlPage = `
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>Matte Glass Fitness</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>iOS Fitness Tracker</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         :root {
-            --bg-base: #0a0c10;
-            --glass-card: rgba(255, 255, 255, 0.035);
-            --glass-border: rgba(255, 255, 255, 0.07);
-            --glass-input: rgba(0, 0, 0, 0.3);
-            --accent-muted: #4a729a;
-            --accent-green: #3d8b6e;
-            --text-main: #e1e4e8;
-            --text-sub: #7a838f;
+            --ios-bg: #000000;
+            --glass-bg: rgba(255, 255, 255, 0.08);
+            --glass-border: rgba(255, 255, 255, 0.18);
+            --glass-shine: rgba(255, 255, 255, 0.25);
+            --accent-green: #30d158;
+            --accent-blue: #0a84ff;
+            --accent-orange: #ff9f0a;
+            --text-primary: #ffffff;
+            --text-secondary: rgba(255, 255, 255, 0.6);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, sans-serif;
         }
 
         body {
-            font-family: -apple-system, SF Pro Text, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            margin: 0;
-            padding: 16px 16px 95px 16px;
-            background: var(--bg-base);
-            color: var(--text-main);
+            background-color: var(--ios-bg);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(10, 132, 255, 0.2) 0px, transparent 50%),
+                radial-gradient(at 100% 0%, rgba(48, 209, 88, 0.18) 0px, transparent 50%),
+                radial-gradient(at 50% 100%, rgba(255, 159, 10, 0.15) 0px, transparent 50%);
+            background-attachment: fixed;
+            color: var(--text-primary);
             min-height: 100vh;
-            box-sizing: border-box;
-            user-select: none;
-            -webkit-user-select: none;
-        }
-
-        .ambient-blur {
-            position: fixed;
-            top: -100px;
-            left: -100px;
-            width: 300px;
-            height: 300px;
-            background: radial-gradient(circle, rgba(74, 114, 154, 0.12) 0%, rgba(0,0,0,0) 70%);
-            z-index: -1;
-            pointer-events: none;
-        }
-
-        .glass-card {
-            background: var(--glass-card);
-            backdrop-filter: blur(40px) saturate(120%);
-            -webkit-backdrop-filter: blur(40px) saturate(120%);
-            border: 1px solid var(--glass-border);
-            border-radius: 20px;
-            padding: 18px;
-            margin-bottom: 14px;
-        }
-
-        .tab-content { display: none; }
-        .tab-content.active { display: block; animation: fadeIn 0.25s cubic-bezier(0,0,0.2,1); }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(4px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        .metric-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-sub); font-weight: 600; }
-        .metric-val { font-size: 26px; font-weight: 700; color: var(--text-main); margin-top: 4px; }
-
-        .progress-bar-bg {
-            width: 100%;
-            height: 8px;
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 6px;
-            overflow: hidden;
-            margin-top: 10px;
-        }
-
-        .progress-bar-fill {
-            height: 100%;
-            width: 0%;
-            background: linear-gradient(90deg, #4a729a, #3d8b6e);
-            border-radius: 6px;
-            transition: width 0.5s ease;
-        }
-
-        .preset-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 8px;
-            margin-top: 12px;
-        }
-
-        .btn-matte {
-            background: rgba(255, 255, 255, 0.04);
-            border: 1px solid var(--glass-border);
-            color: var(--text-main);
-            padding: 12px 0;
-            border-radius: 12px;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.15s ease;
-        }
-
-        .btn-matte:active {
-            transform: scale(0.96);
-            background: rgba(255, 255, 255, 0.1);
-        }
-
-        .btn-primary {
-            width: 100%;
-            padding: 14px;
-            border-radius: 14px;
-            border: 1px solid rgba(255,255,255,0.1);
-            background: rgba(74, 114, 154, 0.25);
-            color: #fff;
-            font-size: 15px;
-            font-weight: 600;
-            cursor: pointer;
-            margin-top: 10px;
-            backdrop-filter: blur(20px);
-        }
-
-        .btn-primary:active { opacity: 0.8; }
-
-        .heatmap-grid {
-            display: grid;
-            grid-template-columns: repeat(10, 1fr);
-            gap: 6px;
-            margin-top: 10px;
-        }
-
-        .heatmap-cell {
-            aspect-ratio: 1;
-            border-radius: 4px;
-            background: rgba(255, 255, 255, 0.04);
-        }
-
-        .tab-bar {
-            position: fixed;
-            bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: calc(100% - 40px);
-            max-width: 400px;
-            background: rgba(14, 17, 22, 0.85);
-            backdrop-filter: blur(30px) saturate(150%);
-            -webkit-backdrop-filter: blur(30px) saturate(150%);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 24px;
-            display: flex;
-            justify-content: space-around;
-            padding: 10px 0;
-            z-index: 1000;
-        }
-
-        .tab-item {
+            padding: 20px 16px 40px 16px;
             display: flex;
             flex-direction: column;
-            align-items: center;
-            color: var(--text-sub);
-            font-size: 10px;
-            cursor: pointer;
+            gap: 16px;
+            overflow-x: hidden;
         }
 
-        .tab-item.active { color: var(--accent-muted); }
-
-        input, select {
-            width: 100%;
-            padding: 12px;
-            border-radius: 10px;
+        /* Glassmorphism Base Card */
+        .glass-card {
+            background: var(--glass-bg);
+            backdrop-filter: blur(30px) saturate(190%);
+            -webkit-backdrop-filter: blur(30px) saturate(190%);
             border: 1px solid var(--glass-border);
-            background: var(--glass-input);
-            color: #fff;
-            box-sizing: border-box;
-            margin-top: 6px;
-            margin-bottom: 10px;
+            border-radius: 24px;
+            padding: 20px;
+            box-shadow: 
+                0 8px 32px 0 rgba(0, 0, 0, 0.37),
+                inset 0 1px 1px 0 var(--glass-shine);
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Header Section */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .user-profile {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .avatar {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-green));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 18px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+
+        .title-sub {
+            font-size: 13px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+
+        .title-main {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        /* Progress Ring & Main Stats */
+        .main-stats {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            margin-top: 10px;
+        }
+
+        .ring-container {
+            position: relative;
+            width: 110px;
+            height: 110px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .ring-svg {
+            transform: rotate(-90deg);
+            width: 100%;
+            height: 100%;
+        }
+
+        .ring-bg {
+            fill: none;
+            stroke: rgba(255, 255, 255, 0.1);
+            stroke-width: 10;
+        }
+
+        .ring-progress {
+            fill: none;
+            stroke: url(#ringGradient);
+            stroke-width: 10;
+            stroke-linecap: round;
+            stroke-dasharray: 283;
+            stroke-dashoffset: 283;
+            transition: stroke-dashoffset 1s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+
+        .ring-text {
+            position: absolute;
+            text-align: center;
+        }
+
+        .ring-percent {
+            font-size: 22px;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+        }
+
+        .ring-label {
+            font-size: 10px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        .stats-details {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 800;
+            letter-spacing: -0.8px;
+            line-height: 1;
+        }
+
+        .stat-value span {
             font-size: 14px;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .stat-desc {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        /* Quick Input Grid */
+        .section-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-left: 4px;
+            margin-bottom: 8px;
+        }
+
+        .presets-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 8px;
+        }
+
+        .btn-glass {
+            background: rgba(255, 255, 255, 0.06);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 16px;
+            padding: 14px 0;
+            color: #fff;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+            outline: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-glass:active {
+            transform: scale(0.92);
+            background: rgba(255, 255, 255, 0.18);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+
+        /* Action Large Button */
+        .btn-primary {
+            background: linear-gradient(135deg, #30d158 0%, #28cd41 100%);
+            border: none;
+            border-radius: 20px;
+            padding: 18px;
+            color: #000;
+            font-size: 17px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+            cursor: pointer;
+            width: 100%;
+            box-shadow: 0 8px 24px rgba(48, 209, 88, 0.35);
+            transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+            margin-top: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-primary:active {
+            transform: scale(0.96);
+            opacity: 0.9;
+        }
+
+        /* Custom Input Row */
+        .custom-input-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .input-glass {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--glass-border);
+            border-radius: 16px;
+            padding: 0 16px;
+            color: #fff;
+            font-size: 16px;
+            font-weight: 600;
+            outline: none;
+            text-align: center;
+        }
+
+        .input-glass::placeholder {
+            color: var(--text-secondary);
+        }
+
+        /* History List */
+        .history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .history-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background: rgba(255, 255, 255, 0.04);
+            border-radius: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .history-count {
+            font-weight: 700;
+            font-size: 16px;
+            color: var(--accent-green);
+        }
+
+        .history-time {
+            font-size: 13px;
+            color: var(--text-secondary);
         }
     </style>
 </head>
 <body>
-    <div class="ambient-blur"></div>
 
-    <div id="tab-home" class="tab-content active">
-        <div class="glass-card">
-            <div style="display: flex; justify-content: space-between;">
-                <div>
-                    <div class="metric-title">ПРОГРЕСС ЗА СЕГОДНЯ</div>
-                    <div class="metric-val" id="todayText">0 / 100</div>
-                </div>
-                <div style="text-align: right;">
-                    <div class="metric-title">РЕЖИМ</div>
-                    <div style="font-size: 14px; margin-top: 6px; color: var(--accent-green);" id="statusBadge">🟢 Активен</div>
-                </div>
-            </div>
-            <div class="progress-bar-bg">
-                <div class="progress-bar-fill" id="progressBar"></div>
-            </div>
-        </div>
-
-        <div class="glass-card">
-            <div class="metric-title" style="margin-bottom: 8px;">Быстрый подход</div>
-            <div class="preset-grid">
-                <button class="btn-matte" onclick="addPushups(10)">+10</button>
-                <button class="btn-matte" onclick="addPushups(20)">+20</button>
-                <button class="btn-matte" onclick="addPushups(30)">+30</button>
-                <button class="btn-matte" onclick="addPushups(50)">+50</button>
-            </div>
-            <div style="margin-top: 12px;">
-                <input type="number" id="customVal" placeholder="Введите число...">
-                <select id="exType">
-                    <option value="classic">💪 Классические</option>
-                    <option value="diamond">💎 Алмазные</option>
-                    <option value="wide">👐 Широкие</option>
-                </select>
-                <button class="btn-primary" onclick="addCustom()">Записать результат</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="tab-stats" class="tab-content">
-        <div class="glass-card">
-            <div class="metric-title">Тепловая карта активности (30 дней)</div>
-            <div class="heatmap-grid" id="heatmapGrid"></div>
-        </div>
-        <div class="glass-card" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: center;">
+    <!-- Header Card -->
+    <div class="glass-card header">
+        <div class="user-profile">
+            <div class="avatar" id="userAvatar">U</div>
             <div>
-                <div class="metric-title">ВСЕГО ПОВТОРЕНИЙ</div>
-                <div class="metric-val" id="statTotal">0</div>
-            </div>
-            <div>
-                <div class="metric-title">РЕКОРД В ПОДХОДЕ</div>
-                <div class="metric-val" id="statMax">0</div>
+                <div class="title-sub">iOS Fitness Tracker</div>
+                <div class="title-main" id="userName">Пользователь</div>
             </div>
         </div>
     </div>
 
-    <div id="tab-settings" class="tab-content">
-        <div class="glass-card">
-            <div class="metric-title" style="margin-bottom: 12px;">Настройки расписания</div>
-            <label style="font-size: 11px; color: var(--text-sub);">Дневная цель:</label>
-            <input type="number" id="cfgGoal">
-
-            <label style="font-size: 11px; color: var(--text-sub);">Интервал напоминаний (часы):</label>
-            <input type="number" id="cfgFreq" value="3">
-
-            <div style="display: flex; align-items: center; margin: 10px 0;">
-                <input type="checkbox" id="cfgPause" style="width: auto; margin: 0 10px 0 0;">
-                <label for="cfgPause" style="font-size: 13px;">Режим отдыха (Пауза всех уведомлений)</label>
+    <!-- Main Goal Card -->
+    <div class="glass-card">
+        <div class="title-sub">Дневной прогресс</div>
+        <div class="main-stats">
+            <div class="ring-container">
+                <svg class="ring-svg" viewBox="0 0 100 100">
+                    <defs>
+                        <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#30d158" />
+                            <stop offset="100%" stop-color="#0a84ff" />
+                        </linearGradient>
+                    </defs>
+                    <circle class="ring-bg" cx="50" cy="50" r="45"></circle>
+                    <circle class="ring-progress" id="progressRing" cx="50" cy="50" r="45"></circle>
+                </svg>
+                <div class="ring-text">
+                    <div class="ring-percent" id="percentText">0%</div>
+                    <div class="ring-label">Цель</div>
+                </div>
             </div>
 
-            <button class="btn-primary" onclick="saveSettings()">Сохранить настройки</button>
-        </div>
-
-        <div class="glass-card">
-            <div class="metric-title">Резервное копирование</div>
-            <p style="font-size: 12px; color: var(--text-sub); margin: 6px 0 12px;">Вы можете выгрузить всю историю подходов в CSV-файл.</p>
-            <button class="btn-matte" style="width: 100%;" onclick="exportData()">📥 Скачать CSV с историей</button>
+            <div class="stats-details">
+                <div class="stat-item">
+                    <div class="stat-value" id="todayCount">0 <span>/ <span id="goalCount">100</span></span></div>
+                    <div class="stat-desc">Отжиманий сегодня</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="setsCount" style="color: var(--accent-blue);">0</div>
+                    <div class="stat-desc">Выполнено подходов</div>
+                </div>
+            </div>
         </div>
     </div>
 
-    <div class="tab-bar">
-        <div class="tab-item active" onclick="switchTab('home', this)">
-            <div style="font-size: 16px;">⚡</div>
-            <div>Главная</div>
+    <!-- Quick Add Section -->
+    <div>
+        <div class="section-title">Быстрый ввод подходод</div>
+        <div class="presets-grid">
+            <button class="btn-glass" onclick="addPushups(5)">+5</button>
+            <button class="btn-glass" onclick="addPushups(10)">+10</button>
+            <button class="btn-glass" onclick="addPushups(15)">+15</button>
+            <button class="btn-glass" onclick="addPushups(20)">+20</button>
+            <button class="btn-glass" onclick="addPushups(25)">+25</button>
         </div>
-        <div class="tab-item" onclick="switchTab('stats', this)">
-            <div style="font-size: 16px;">📅</div>
-            <div>Карта</div>
+
+        <div class="custom-input-group">
+            <input type="number" id="customInput" class="input-glass" placeholder="Свой вариант..." min="1">
+            <button class="btn-glass" style="padding: 0 20px;" onclick="addCustom()">Записать</button>
         </div>
-        <div class="tab-item" onclick="switchTab('settings', this)">
-            <div style="font-size: 16px;">⚙️</div>
-            <div>Настройки</div>
+    </div>
+
+    <!-- History Card -->
+    <div class="glass-card">
+        <div class="title-sub" style="margin-bottom: 12px;">Сегодняшние подходы</div>
+        <div class="history-list" id="historyList">
+            <div style="text-align: center; color: var(--text-secondary); padding: 10px; font-size: 14px;">
+                Подходов пока нет
+            </div>
         </div>
     </div>
 
     <script>
         const tg = window.Telegram.WebApp;
         tg.expand();
+        tg.ready();
 
+        // Инициализация данных пользователя
         const user = tg.initDataUnsafe?.user;
-        const userId = user ? user.id : 12345;
-        const username = user ? (user.username || user.first_name) : 'User';
-
-        function haptic() { if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light'); }
-
-        function switchTab(id, el) {
-            haptic();
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-item').forEach(i => i.classList.remove('active'));
-            document.getElementById('tab-' + id).classList.add('active');
-            el.classList.add('active');
-            if (id === 'stats') loadHeatmap();
+        if (user) {
+            document.getElementById('userName').innerText = user.first_name || 'Спортсмен';
+            document.getElementById('userAvatar').innerText = (user.first_name || 'U')[0].toUpperCase();
         }
 
-        async function loadSummary() {
-            const res = await fetch('/api/user-summary?user_id=' + userId);
-            const data = await res.json();
+        let todayTotal = 0;
+        let goal = 100;
+        let sets = 0;
 
-            const today = data.today || 0;
-            const goal = data.settings?.daily_goal || 100;
-            const pct = Math.min(100, Math.round((today / goal) * 100));
-
-            document.getElementById('todayText').innerText = today + ' / ' + goal;
-            document.getElementById('progressBar').style.width = pct + '%';
-            document.getElementById('statTotal').innerText = data.total || 0;
-            document.getElementById('statMax').innerText = data.max_set || 0;
-
-            if (data.settings) {
-                document.getElementById('cfgGoal').value = goal;
-                document.getElementById('cfgFreq').value = data.settings.frequency || 3;
-                document.getElementById('cfgPause').checked = data.settings.is_paused === 1;
-                document.getElementById('statusBadge').innerText = data.settings.is_paused ? '🔴 На паузе' : '🟢 Активен';
+        function triggerHaptic() {
+            if (tg.HapticFeedback) {
+                tg.HapticFeedback.impactOccurred('medium');
             }
         }
 
-        async function addPushups(count) {
-            haptic();
-            const type = document.getElementById('exType').value;
-            await fetch('/api/pushups', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, username, count, type })
-            });
-            loadSummary();
+        function updateProgress(count) {
+            todayTotal += count;
+            sets += 1;
+            
+            document.getElementById('todayCount').innerHTML = `${todayTotal} <span>/ ${goal}</span>`;
+            document.getElementById('setsCount').innerText = sets;
+
+            // Обновление кольца
+            const percent = Math.min(Math.round((todayTotal / goal) * 100), 100);
+            document.getElementById('percentText').innerText = `${percent}%`;
+            
+            const circle = document.getElementById('progressRing');
+            const circumference = 2 * Math.PI * 45; // 283
+            const offset = circumference - (percent / 100) * circumference;
+            circle.style.strokeDashoffset = offset;
+
+            // Добавление в историю
+            const historyList = document.getElementById('historyList');
+            if (sets === 1) historyList.innerHTML = '';
+
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+            const item = document.createElement('div');
+            item.className = 'history-item';
+            item.innerHTML = `
+                <span class="history-count">+${count} отжиманий</span>
+                <span class="history-time">${timeStr}</span>
+            `;
+            historyList.prepend(item);
+        }
+
+        function addPushups(count) {
+            triggerHaptic();
+            updateProgress(count);
+            
+            // Отправка данных на бэкенд/бот через Telegram WebApp API
+            tg.sendData(JSON.stringify({
+                action: 'add_pushups',
+                count: count
+            }));
         }
 
         function addCustom() {
-            const val = parseInt(document.getElementById('customVal').value);
+            const input = document.getElementById('customInput');
+            const val = parseInt(input.value);
             if (val > 0) {
                 addPushups(val);
-                document.getElementById('customVal').value = '';
+                input.value = '';
             }
         }
-
-        async function loadHeatmap() {
-            const res = await fetch('/api/heatmap?user_id=' + userId);
-            const rows = await res.json();
-            const map = {};
-            rows.forEach(r => map[r.day ? r.day.split('T')[0] : ''] = r.total);
-
-            const grid = document.getElementById('heatmapGrid');
-            grid.innerHTML = '';
-
-            for (let i = 29; i >= 0; i--) {
-                const d = new Date();
-                d.setDate(d.getDate() - i);
-                const iso = d.toISOString().split('T')[0];
-                const count = map[iso] || 0;
-
-                const cell = document.createElement('div');
-                cell.className = 'heatmap-cell';
-                if (count > 0) {
-                    const alpha = Math.min(1, count / 100);
-                    cell.style.background = 'rgba(74, 114, 154, ' + (0.2 + alpha * 0.8) + ')';
-                }
-                grid.appendChild(cell);
-            }
-        }
-
-        async function saveSettings() {
-            haptic();
-            await fetch('/api/settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    user_id: userId,
-                    daily_goal: document.getElementById('cfgGoal').value,
-                    frequency: document.getElementById('cfgFreq').value,
-                    is_paused: document.getElementById('cfgPause').checked,
-                    start_time: '09:00',
-                    end_time: '21:00'
-                })
-            });
-            if (tg.showPopup) tg.showPopup({ title: 'Успешно', message: 'Настройки сохранены.' });
-            loadSummary();
-        }
-
-        function exportData() {
-            window.location.href = '/api/export?user_id=' + userId;
-        }
-
-        loadSummary();
     </script>
 </body>
 </html>
-`;
-
-// Все варианты маршрутов ведут к WebApp, исключая ошибку "Not Found"
-app.get('/webapp', (req, res) => res.send(htmlPage));
-app.get('/', (req, res) => res.send(htmlPage));
-
-// --- ОБРАБОТКА КОМАНД И КНОПОК TELEGRAM ---
-bot.start((ctx) => {
-    const webAppUrl = process.env.WEBAPP_URL || 'https://sport-ya.onrender.com/webapp';
-    ctx.reply('💪 Матовый трекер подходов подключён к Supabase!\n\nВсе данные сохраняются навсегда.', {
-        reply_markup: {
-            inline_keyboard: [[
-                { text: "📊 Открыть iOS Трекер", web_app: { url: webAppUrl } }
-            ]]
-        }
-    });
-});
-
-bot.on('text', async (ctx) => {
-    const text = ctx.message.text;
-    const match = text.match(/\d+/);
-    
-    if (match) {
-        const count = parseInt(match[0]);
-        try {
-            await logExercise(ctx.from.id, ctx.from.username || ctx.from.first_name, count, 'pushups', 'classic');
-            ctx.reply(`✅ Записано: +${count} отжиманий! 🔥`);
-        } catch (e) {
-            ctx.reply('❌ Ошибка сохранения в базу данных.');
-        }
-    } else {
-        ctx.reply('Отправьте число (например: 25) или воспользуйтесь кнопкой снизу.');
-    }
-});
-
-bot.on('callback_query', async (ctx) => {
-    const data = ctx.callbackQuery.data;
-    const userId = ctx.from.id;
-
-    try {
-        if (data.startsWith('add_')) {
-            const count = parseInt(data.split('_')[1]);
-            await logExercise(userId, ctx.from.username || ctx.from.first_name, count, 'pushups', 'classic');
-            await ctx.answerCbQuery(`Записано +${count}!`);
-            await ctx.editMessageText(`✅ Отлично! Записано +${count} отжиманий.`);
-        } else if (data.startsWith('snooze_')) {
-            const mins = parseInt(data.split('_')[1]);
-            const nextTime = new Date(Date.now() + mins * 60 * 1000);
-            
-            await pool.query(`UPDATE settings SET next_reminder = $1 WHERE user_id = $2`, [nextTime, userId]);
-            await ctx.answerCbQuery(`Отложено на ${mins} мин`);
-            await ctx.editMessageText(`⏱ Напоминание отложено на ${mins} минут.`);
-        }
-    } catch (e) {
-        console.error('Ошибка обработки кнопки:', e);
-        await ctx.answerCbQuery('Ошибка действия');
-    }
-});
-
-// --- ТОЧНЫЙ ТАЙМЕР НАПОМИНАНИЙ ---
-setInterval(async () => {
-    try {
-        const now = new Date();
-        const res = await pool.query(`SELECT * FROM settings WHERE is_paused = 0`);
-
-        for (const user of res.rows) {
-            const nextReminderTime = user.next_reminder ? new Date(user.next_reminder).getTime() : 0;
-            const shouldRemind = !user.next_reminder || nextReminderTime <= now.getTime();
-
-            if (shouldRemind) {
-                const freqHours = user.frequency || 3;
-                const nextRem = new Date(Date.now() + freqHours * 3600 * 1000);
-
-                await pool.query(`UPDATE settings SET next_reminder = $1 WHERE user_id = $2`, [nextRem, user.user_id]);
-
-                await bot.telegram.sendMessage(
-                    user.user_id,
-                    '🔔 Время сделать подход! Выберите действие или отложите:',
-                    Markup.inlineKeyboard([
-                        [
-                            Markup.button.callback('+15', 'add_15'),
-                            Markup.button.callback('+25', 'add_25'),
-                            Markup.button.callback('+35', 'add_35')
-                        ],
-                        [
-                            Markup.button.callback('⏱ 15 мин', 'snooze_15'),
-                            Markup.button.callback('⏱ 30 мин', 'snooze_30'),
-                            Markup.button.callback('⏱ 1 час', 'snooze_60')
-                        ]
-                    ])
-                ).catch((err) => console.error('Ошибка отправки уведомления:', err.message));
-            }
-        }
-    } catch (e) {
-        console.error('Ошибка в фоновом планировщике:', e);
-    }
-}, 60000);
-
-bot.launch();
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
