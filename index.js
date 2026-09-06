@@ -13,23 +13,23 @@ if (token) {
     
     bot.onText(/\/start/, (msg) => {
         const chatId = msg.chat.id;
-        bot.sendMessage(chatId, 'Привет! Нажми кнопку ниже, чтобы открыть трекер подходов:', {
+        bot.sendMessage(chatId, 'Привет! Нажми кнопку ниже, чтобы открыть фитнес-трекер:', {
             reply_markup: {
                 inline_keyboard: [[
-                    { text: '📊 Открыть iOS Трекер', web_app: { url: process.env.WEBAPP_URL || 'https://sport-ya.onrender.com' } }
+                    { text: '📊 Открыть Трекер', web_app: { url: process.env.WEBAPP_URL || 'https://sport-ya.onrender.com' } }
                 ]]
             }
         });
     });
 }
 
-// Подключение к Supabase
+// Подключение к Supabase (PostgreSQL)
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
 });
 
-// Автоматическое создание таблицы в БД
+// Автоматическая инициализация таблиц
 async function initDB() {
     try {
         await pool.query(`
@@ -39,8 +39,15 @@ async function initDB() {
                 count INT NOT NULL,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id BIGINT PRIMARY KEY,
+                goal INT DEFAULT 100,
+                reminders_enabled BOOLEAN DEFAULT true,
+                reminder_interval_hours INT DEFAULT 3,
+                last_reminder_sent TIMESTAMP WITH TIME ZONE
+            );
         `);
-        console.log('✅ База данных Supabase готова к работе!');
+        console.log('✅ База данных Supabase и таблицы готовы к работе!');
     } catch (err) {
         console.error('❌ Ошибка инициализации БД:', err);
     }
@@ -49,29 +56,70 @@ initDB();
 
 app.use(express.json());
 
-// --- API МАРШРУТЫ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ---
+// Фоновый планировщик напоминаний в Telegram (проверка каждые 5 минут)
+setInterval(async () => {
+    if (!bot) return;
+    try {
+        const res = await pool.query(`
+            SELECT s.user_id, s.reminder_interval_hours 
+            FROM user_settings s
+            WHERE s.reminders_enabled = true 
+              AND (s.last_reminder_sent IS NULL OR s.last_reminder_sent < NOW() - (s.reminder_interval_hours || ' hours')::INTERVAL)
+              AND NOT EXISTS (
+                  SELECT 1 FROM pushups p 
+                  WHERE p.user_id = s.user_id 
+                    AND p.created_at >= CURRENT_DATE
+              )
+        `);
 
-// 1. Получение статистики пользователя за сегодня
-app.get('/api/stats', async (req, res) => {
+        for (const row of res.rows) {
+            bot.sendMessage(row.user_id, '💪 Пора сделать подход! Не забывай про свою дневную цель. Открой трекер в меню ниже.');
+            await pool.query('UPDATE user_settings SET last_reminder_sent = NOW() WHERE user_id = $1', [row.user_id]);
+        }
+    } catch (e) {
+        console.error('Ошибка отправки уведомлений:', e);
+    }
+}, 5 * 60 * 1000);
+
+// --- API ЭНДПОИНТЫ ---
+
+// 1. Получение полной информации пользователя
+app.get('/api/user-data', async (req, res) => {
     const userId = req.query.user_id;
     if (!userId) return res.status(400).json({ error: 'User ID required' });
 
     try {
-        const query = `
+        // Настройки
+        let settingsRes = await pool.query('SELECT * FROM user_settings WHERE user_id = $1', [userId]);
+        if (settingsRes.rows.length === 0) {
+            await pool.query('INSERT INTO user_settings (user_id) VALUES ($1)', [userId]);
+            settingsRes = await pool.query('SELECT * FROM user_settings WHERE user_id = $1', [userId]);
+        }
+
+        // Сегодняшние подходы
+        const todayRes = await pool.query(`
             SELECT id, count, created_at 
             FROM pushups 
             WHERE user_id = $1 AND created_at >= CURRENT_DATE 
             ORDER BY created_at DESC
-        `;
-        const result = await pool.query(query, [userId]);
-        res.json({ success: true, history: result.rows });
+        `, [userId]);
+
+        // Общая статистика
+        const totalRes = await pool.query('SELECT SUM(count) as total_count FROM pushups WHERE user_id = $1', [userId]);
+
+        res.json({
+            success: true,
+            settings: settingsRes.rows[0],
+            todayHistory: todayRes.rows,
+            totalCount: parseInt(totalRes.rows[0].total_count) || 0
+        });
     } catch (err) {
-        console.error('Ошибка получения данных из БД:', err);
+        console.error(err);
         res.status(500).json({ error: 'Database error' });
     }
 });
 
-// 2. Сохранение нового подхода в БД
+// 2. Добавление подходов
 app.post('/api/add', async (req, res) => {
     const { user_id, count } = req.body;
     if (!user_id || !count) return res.status(400).json({ error: 'Invalid data' });
@@ -80,27 +128,61 @@ app.post('/api/add', async (req, res) => {
         await pool.query('INSERT INTO pushups (user_id, count) VALUES ($1, $2)', [user_id, count]);
         res.json({ success: true });
     } catch (err) {
-        console.error('Ошибка записи в БД:', err);
         res.status(500).json({ error: 'Database error' });
     }
 });
 
-// --- ВЕБ-ИНТЕРФЕЙС WEB APP ---
+// 3. Сохранение настроек (Цель, Напоминания)
+app.post('/api/settings', async (req, res) => {
+    const { user_id, goal, reminders_enabled, reminder_interval_hours } = req.body;
+    try {
+        await pool.query(`
+            INSERT INTO user_settings (user_id, goal, reminders_enabled, reminder_interval_hours)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id) DO UPDATE SET
+                goal = EXCLUDED.goal,
+                reminders_enabled = EXCLUDED.reminders_enabled,
+                reminder_interval_hours = EXCLUDED.reminder_interval_hours
+        `, [user_id, goal, reminders_enabled, reminder_interval_hours]);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Database error' });
+    }
+});
+
+// 4. Данные для календаря
+app.get('/api/calendar', async (req, res) => {
+    const userId = req.query.user_id;
+    try {
+        const result = await pool.query(`
+            SELECT DATE(created_at) as date, SUM(count) as total
+            FROM pushups
+            WHERE user_id = $1
+            GROUP BY DATE(created_at)
+            ORDER BY date DESC
+            LIMIT 30
+        `, [userId]);
+        res.json({ success: true, calendar: result.rows });
+    } catch (err) {
+        res.status(500).json({ error: 'Database error' });
+    }
+});
+
+// --- ВЕБ ИНТЕРФЕЙС WEB APP (HTML/CSS/JS) ---
 app.get('*', (req, res) => {
     res.send(`
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>iOS Fitness Tracker</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         :root {
             --ios-bg: #000000;
             --glass-bg: rgba(255, 255, 255, 0.08);
-            --glass-border: rgba(255, 255, 255, 0.18);
-            --glass-shine: rgba(255, 255, 255, 0.25);
+            --glass-border: rgba(255, 255, 255, 0.15);
             --accent-green: #30d158;
             --accent-blue: #0a84ff;
             --accent-orange: #ff9f0a;
@@ -110,166 +192,226 @@ app.get('*', (req, res) => {
 
         * {
             box-sizing: border-box;
-            margin: 0;
-            padding: 0;
+            margin: 0; padding: 0;
             user-select: none;
-            -webkit-user-select: none;
-            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", Roboto, sans-serif;
         }
 
         body {
             background-color: var(--ios-bg);
             background-image: 
                 radial-gradient(at 0% 0%, rgba(10, 132, 255, 0.2) 0px, transparent 50%),
-                radial-gradient(at 100% 0%, rgba(48, 209, 88, 0.18) 0px, transparent 50%),
-                radial-gradient(at 50% 100%, rgba(255, 159, 10, 0.15) 0px, transparent 50%);
+                radial-gradient(at 100% 0%, rgba(48, 209, 88, 0.18) 0px, transparent 50%);
             background-attachment: fixed;
             color: var(--text-primary);
             min-height: 100vh;
-            padding: 20px 16px 40px 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-            overflow-x: hidden;
+            padding-top: max(16px, env(safe-area-inset-top));
+            padding-bottom: max(90px, env(safe-area-inset-bottom));
+            padding-left: 16px; padding-right: 16px;
+            display: flex; flex-direction: column; gap: 16px;
         }
 
         .glass-card {
             background: var(--glass-bg);
-            backdrop-filter: blur(30px) saturate(190%);
-            -webkit-backdrop-filter: blur(30px) saturate(190%);
+            backdrop-filter: blur(25px) saturate(180%);
+            -webkit-backdrop-filter: blur(25px) saturate(180%);
             border: 1px solid var(--glass-border);
-            border-radius: 24px;
-            padding: 20px;
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 1px 1px 0 var(--glass-shine);
-            position: relative;
-            overflow: hidden;
+            border-radius: 22px; padding: 18px;
         }
 
         .header { display: flex; justify-content: space-between; align-items: center; }
         .user-profile { display: flex; align-items: center; gap: 12px; }
         .avatar {
-            width: 44px; height: 44px; border-radius: 50%;
+            width: 42px; height: 42px; border-radius: 50%;
             background: linear-gradient(135deg, var(--accent-blue), var(--accent-green));
             display: flex; align-items: center; justify-content: center;
-            font-weight: 700; font-size: 18px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            font-weight: 700; font-size: 18px;
         }
-        .title-sub { font-size: 13px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
-        .title-main { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
+        .title-sub { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+        .title-main { font-size: 19px; font-weight: 700; }
 
-        .main-stats { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-top: 10px; }
-        .ring-container { position: relative; width: 110px; height: 110px; display: flex; align-items: center; justify-content: center; }
+        .main-stats { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 10px; }
+        .ring-container { position: relative; width: 100px; height: 100px; display: flex; align-items: center; justify-content: center; }
         .ring-svg { transform: rotate(-90deg); width: 100%; height: 100%; }
-        .ring-bg { fill: none; stroke: rgba(255, 255, 255, 0.1); stroke-width: 10; }
+        .ring-bg { fill: none; stroke: rgba(255, 255, 255, 0.1); stroke-width: 9; }
         .ring-progress {
-            fill: none; stroke: url(#ringGradient); stroke-width: 10; stroke-linecap: round;
-            stroke-dasharray: 283; stroke-dashoffset: 283; transition: stroke-dashoffset 1s cubic-bezier(0.2, 0.8, 0.2, 1);
+            fill: none; stroke: url(#ringGradient); stroke-width: 9; stroke-linecap: round;
+            stroke-dasharray: 283; stroke-dashoffset: 283; transition: stroke-dashoffset 0.8s ease;
         }
         .ring-text { position: absolute; text-align: center; }
-        .ring-percent { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
-        .ring-label { font-size: 10px; color: var(--text-secondary); text-transform: uppercase; }
+        .ring-percent { font-size: 20px; font-weight: 800; }
 
-        .stats-details { flex: 1; display: flex; flex-direction: column; gap: 12px; }
-        .stat-item { display: flex; flex-direction: column; }
-        .stat-value { font-size: 28px; font-weight: 800; letter-spacing: -0.8px; line-height: 1; }
-        .stat-value span { font-size: 14px; color: var(--text-secondary); font-weight: 500; }
+        .stat-value { font-size: 26px; font-weight: 800; line-height: 1; }
         .stat-desc { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
 
-        .section-title { font-size: 15px; font-weight: 600; color: var(--text-secondary); margin-left: 4px; margin-bottom: 8px; }
         .presets-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
         .btn-glass {
-            background: rgba(255, 255, 255, 0.06);
-            backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 16px;
-            padding: 14px 0; color: #fff; font-size: 16px; font-weight: 700;
-            cursor: pointer; transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
-            outline: none; display: flex; align-items: center; justify-content: center;
+            background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 14px; padding: 12px 0; color: #fff; font-size: 15px; font-weight: 700;
+            cursor: pointer; outline: none; display: flex; align-items: center; justify-content: center;
         }
-        .btn-glass:active { transform: scale(0.92); background: rgba(255, 255, 255, 0.18); border-color: rgba(255, 255, 255, 0.3); }
+        .btn-glass:active { transform: scale(0.93); background: rgba(255, 255, 255, 0.2); }
 
-        .custom-input-group { display: flex; gap: 10px; margin-top: 10px; }
+        .custom-input-group { display: flex; gap: 8px; margin-top: 10px; }
         .input-glass {
             flex: 1; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--glass-border);
-            border-radius: 16px; padding: 0 16px; color: #fff; font-size: 16px;
-            font-weight: 600; outline: none; text-align: center;
+            border-radius: 14px; padding: 0 14px; color: #fff; font-size: 15px; text-align: center; outline: none;
         }
 
-        .history-list { display: flex; flex-direction: column; gap: 10px; max-height: 200px; overflow-y: auto; }
+        .history-list { display: flex; flex-direction: column; gap: 8px; max-height: 180px; overflow-y: auto; }
         .history-item {
-            display: flex; justify-content: space-between; align-items: center; padding: 12px 16px;
-            background: rgba(255, 255, 255, 0.04); border-radius: 14px; border: 1px solid rgba(255, 255, 255, 0.08);
+            display: flex; justify-content: space-between; align-items: center; padding: 10px 14px;
+            background: rgba(255, 255, 255, 0.04); border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.08);
         }
-        .history-count { font-weight: 700; font-size: 16px; color: var(--accent-green); }
-        .history-time { font-size: 13px; color: var(--text-secondary); }
+
+        /* Нижнее меню вкладок (TabBar) */
+        .tab-bar {
+            position: fixed; bottom: 0; left: 0; right: 0;
+            background: rgba(20, 20, 20, 0.85);
+            backdrop-filter: blur(25px) saturate(190%);
+            border-top: 1px solid var(--glass-border);
+            display: flex; justify-content: space-around;
+            padding-top: 8px; padding-bottom: max(12px, env(safe-area-inset-bottom));
+            z-index: 1000;
+        }
+        .tab-btn {
+            background: none; border: none; color: var(--text-secondary);
+            font-size: 11px; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer;
+        }
+        .tab-btn.active { color: var(--accent-blue); font-weight: 700; }
+        .tab-icon { font-size: 18px; }
+
+        .tab-content { display: none; }
+        .tab-content.active { display: flex; flex-direction: column; gap: 16px; }
+
+        .setting-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
     </style>
 </head>
 <body>
 
-    <div class="glass-card header">
-        <div class="user-profile">
-            <div class="avatar" id="userAvatar">U</div>
-            <div>
-                <div class="title-sub">iOS Fitness Tracker</div>
-                <div class="title-main" id="userName">Пользователь</div>
-            </div>
-        </div>
-    </div>
-
-    <div class="glass-card">
-        <div class="title-sub">Дневной прогресс</div>
-        <div class="main-stats">
-            <div class="ring-container">
-                <svg class="ring-svg" viewBox="0 0 100 100">
-                    <defs>
-                        <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" stop-color="#30d158" />
-                            <stop offset="100%" stop-color="#0a84ff" />
-                        </linearGradient>
-                    </defs>
-                    <circle class="ring-bg" cx="50" cy="50" r="45"></circle>
-                    <circle class="ring-progress" id="progressRing" cx="50" cy="50" r="45"></circle>
-                </svg>
-                <div class="ring-text">
-                    <div class="ring-percent" id="percentText">0%</div>
-                    <div class="ring-label">Цель</div>
-                </div>
-            </div>
-
-            <div class="stats-details">
-                <div class="stat-item">
-                    <div class="stat-value" id="todayCount">0 <span>/ <span id="goalCount">100</span></span></div>
-                    <div class="stat-desc">Отжиманий сегодня</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-value" id="setsCount" style="color: var(--accent-blue);">0</div>
-                    <div class="stat-desc">Выполнено подходов</div>
+    <!-- Вкладка 1: Главная -->
+    <div id="tab-home" class="tab-content active">
+        <div class="glass-card header">
+            <div class="user-profile">
+                <div class="avatar" id="userAvatar">U</div>
+                <div>
+                    <div class="title-sub">iOS Fitness Tracker</div>
+                    <div class="title-main" id="userName">Пользователь</div>
                 </div>
             </div>
         </div>
-    </div>
 
-    <div>
-        <div class="section-title">Быстрый ввод подходов</div>
-        <div class="presets-grid">
-            <button class="btn-glass" onclick="addPushups(5)">+5</button>
-            <button class="btn-glass" onclick="addPushups(10)">+10</button>
-            <button class="btn-glass" onclick="addPushups(15)">+15</button>
-            <button class="btn-glass" onclick="addPushups(20)">+20</button>
-            <button class="btn-glass" onclick="addPushups(25)">+25</button>
-        </div>
+        <div class="glass-card">
+            <div class="title-sub">Дневной прогресс</div>
+            <div class="main-stats">
+                <div class="ring-container">
+                    <svg class="ring-svg" viewBox="0 0 100 100">
+                        <defs>
+                            <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#30d158" />
+                                <stop offset="100%" stop-color="#0a84ff" />
+                            </linearGradient>
+                        </defs>
+                        <circle class="ring-bg" cx="50" cy="50" r="45"></circle>
+                        <circle class="ring-progress" id="progressRing" cx="50" cy="50" r="45"></circle>
+                    </svg>
+                    <div class="ring-text">
+                        <div class="ring-percent" id="percentText">0%</div>
+                    </div>
+                </div>
 
-        <div class="custom-input-group">
-            <input type="number" id="customInput" class="input-glass" placeholder="Свой вариант..." min="1">
-            <button class="btn-glass" style="padding: 0 20px;" onclick="addCustom()">Записать</button>
-        </div>
-    </div>
-
-    <div class="glass-card">
-        <div class="title-sub" style="margin-bottom: 12px;">Сегодняшние подходы</div>
-        <div class="history-list" id="historyList">
-            <div style="text-align: center; color: var(--text-secondary); padding: 10px; font-size: 14px;">
-                Загрузка данных...
+                <div style="flex:1; display:flex; flex-direction:column; gap:10px;">
+                    <div>
+                        <div class="stat-value" id="todayCount">0 <span style="font-size:14px; color:var(--text-secondary);">/ <span id="goalCount">100</span></span></div>
+                        <div class="stat-desc">Отжиманий сегодня</div>
+                    </div>
+                    <div>
+                        <div class="stat-value" id="setsCount" style="color:var(--accent-blue);">0</div>
+                        <div class="stat-desc">Подходов сегодня</div>
+                    </div>
+                </div>
             </div>
         </div>
+
+        <div>
+            <div class="title-sub" style="margin-left: 4px; margin-bottom: 8px;">Быстрый ввод</div>
+            <div class="presets-grid">
+                <button class="btn-glass" onclick="addPushups(5)">+5</button>
+                <button class="btn-glass" onclick="addPushups(10)">+10</button>
+                <button class="btn-glass" onclick="addPushups(15)">+15</button>
+                <button class="btn-glass" onclick="addPushups(20)">+20</button>
+                <button class="btn-glass" onclick="addPushups(25)">+25</button>
+            </div>
+            <div class="custom-input-group">
+                <input type="number" id="customInput" class="input-glass" placeholder="Свое число..." min="1">
+                <button class="btn-glass" style="padding: 0 16px;" onclick="addCustom()">Записать</button>
+            </div>
+        </div>
+
+        <div class="glass-card">
+            <div class="title-sub" style="margin-bottom: 10px;">Сегодняшние подходы</div>
+            <div class="history-list" id="historyList"></div>
+        </div>
+    </div>
+
+    <!-- Вкладка 2: Календарь -->
+    <div id="tab-calendar" class="tab-content">
+        <div class="glass-card">
+            <div class="title-sub" style="margin-bottom: 12px;">История по дням</div>
+            <div class="history-list" id="calendarList">Загрузка...</div>
+        </div>
+    </div>
+
+    <!-- Вкладка 3: Прогресс -->
+    <div id="tab-progress" class="tab-content">
+        <div class="glass-card">
+            <div class="title-sub">Всего отжато за всё время</div>
+            <div class="stat-value" id="totalAllTime" style="font-size:36px; color:var(--accent-green); margin-top:8px;">0</div>
+        </div>
+    </div>
+
+    <!-- Вкладка 4: Настройки -->
+    <div id="tab-settings" class="tab-content">
+        <div class="glass-card">
+            <div class="title-sub" style="margin-bottom: 16px;">Настройки профиля</div>
+            
+            <div class="setting-row">
+                <span>Дневная цель:</span>
+                <input type="number" id="settingGoal" class="input-glass" style="width: 80px;" value="100">
+            </div>
+
+            <div class="setting-row">
+                <span>Напоминания в боте:</span>
+                <input type="checkbox" id="settingReminders" checked style="width: 20px; height: 20px;">
+            </div>
+
+            <div class="setting-row">
+                <span>Частота (каждые N часов):</span>
+                <input type="number" id="settingInterval" class="input-glass" style="width: 80px;" value="3" min="1" max="24">
+            </div>
+
+            <button class="btn-glass" style="width:100%; margin-top: 10px;" onclick="saveSettings()">Сохранить настройки</button>
+        </div>
+    </div>
+
+    <!-- Нижняя панель навигации -->
+    <div class="tab-bar">
+        <button class="tab-btn active" onclick="switchTab('home', this)">
+            <span class="tab-icon">📊</span>
+            <span>Главная</span>
+        </button>
+        <button class="tab-btn" onclick="switchTab('calendar', this)">
+            <span class="tab-icon">📅</span>
+            <span>Календарь</span>
+        </button>
+        <button class="tab-btn" onclick="switchTab('progress', this)">
+            <span class="tab-icon">📈</span>
+            <span>Прогресс</span>
+        </button>
+        <button class="tab-btn" onclick="switchTab('settings', this)">
+            <span class="tab-icon">⚙️</span>
+            <span>Настройки</span>
+        </button>
     </div>
 
     <script>
@@ -278,102 +420,130 @@ app.get('*', (req, res) => {
         tg.ready();
 
         const user = tg.initDataUnsafe?.user;
-        const userId = user ? user.id : 999999; // Фолбэк для тестов вне Telegram
+        const userId = user ? user.id : 999999;
 
         if (user) {
             document.getElementById('userName').innerText = user.first_name || 'Спортсмен';
             document.getElementById('userAvatar').innerText = (user.first_name || 'U')[0].toUpperCase();
         }
 
-        let todayTotal = 0;
-        let goal = 100;
-        let sets = 0;
+        let userGoal = 100;
 
         function triggerHaptic() {
-            if (tg.HapticFeedback) {
-                tg.HapticFeedback.impactOccurred('medium');
-            }
+            if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
         }
 
-        // Загрузка сохраненных подходов из базы Supabase
+        function switchTab(tabName, btn) {
+            triggerHaptic();
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+
+            document.getElementById('tab-' + tabName).classList.add('active');
+            btn.classList.add('active');
+
+            if (tabName === 'calendar') loadCalendar();
+        }
+
         async function loadUserData() {
             try {
-                const response = await fetch(\`/api/stats?user_id=\${userId}\`);
-                const data = await response.json();
+                const res = await fetch(\`/api/user-data?user_id=\${userId}\`);
+                const data = await res.json();
 
                 if (data.success) {
+                    userGoal = data.settings.goal || 100;
+                    document.getElementById('goalCount').innerText = userGoal;
+                    document.getElementById('settingGoal').value = userGoal;
+                    document.getElementById('settingReminders').checked = data.settings.reminders_enabled;
+                    document.getElementById('settingInterval').value = data.settings.reminder_interval_hours || 3;
+                    document.getElementById('totalAllTime').innerText = data.totalCount;
+
+                    let todayTotal = 0;
                     const historyList = document.getElementById('historyList');
                     historyList.innerHTML = '';
 
-                    todayTotal = 0;
-                    sets = data.history.length;
+                    document.getElementById('setsCount').innerText = data.todayHistory.length;
 
-                    if (sets === 0) {
-                        historyList.innerHTML = \`<div style="text-align: center; color: var(--text-secondary); padding: 10px; font-size: 14px;">Подходов пока нет</div>\`;
+                    if (data.todayHistory.length === 0) {
+                        historyList.innerHTML = '<div style="text-align:center; color:var(--text-secondary); font-size:13px;">Подходов пока нет</div>';
                     } else {
-                        data.history.forEach(row => {
+                        data.todayHistory.forEach(row => {
                             todayTotal += row.count;
-                            const date = new Date(row.created_at);
-                            const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-                            const item = document.createElement('div');
-                            item.className = 'history-item';
-                            item.innerHTML = \`
-                                <span class="history-count">+\${row.count} отжиманий</span>
-                                <span class="history-time">\${timeStr}</span>
-                            \`;
-                            historyList.appendChild(item);
+                            const timeStr = new Date(row.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                            historyList.innerHTML += \`
+                                <div class="history-item">
+                                    <span style="font-weight:700; color:var(--accent-green);">+\${row.count} отжиманий</span>
+                                    <span style="font-size:12px; color:var(--text-secondary);">\${timeStr}</span>
+                                </div>\`;
                         });
                     }
 
-                    renderUI();
+                    document.getElementById('todayCount').innerHTML = \`\${todayTotal} <span style="font-size:14px; color:var(--text-secondary);">/ \${userGoal}</span>\`;
+                    const percent = Math.min(Math.round((todayTotal / userGoal) * 100), 100);
+                    document.getElementById('percentText').innerText = \`\${percent}%\`;
+
+                    const circle = document.getElementById('progressRing');
+                    circle.style.strokeDashoffset = 283 - (percent / 100) * 283;
                 }
-            } catch (err) {
-                console.error('Ошибка загрузки:', err);
-            }
-        }
-
-        function renderUI() {
-            document.getElementById('todayCount').innerHTML = \`\${todayTotal} <span>/ \${goal}</span>\`;
-            document.getElementById('setsCount').innerText = sets;
-
-            const percent = Math.min(Math.round((todayTotal / goal) * 100), 100);
-            document.getElementById('percentText').innerText = \`\${percent}%\`;
-            
-            const circle = document.getElementById('progressRing');
-            const circumference = 2 * Math.PI * 45;
-            const offset = circumference - (percent / 100) * circumference;
-            circle.style.strokeDashoffset = offset;
+            } catch (err) { console.error(err); }
         }
 
         async function addPushups(count) {
             triggerHaptic();
-            
-            // Отправляем запись прямо в БД Supabase
-            try {
-                await fetch('/api/add', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId, count: count })
-                });
-
-                // Перезагружаем список, чтобы подтянуть точные данные из БД
-                loadUserData();
-            } catch (err) {
-                console.error('Ошибка сохранения:', err);
-            }
+            await fetch('/api/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, count: count })
+            });
+            loadUserData();
         }
 
         function addCustom() {
-            const input = document.getElementById('customInput');
-            const val = parseInt(input.value);
+            const val = parseInt(document.getElementById('customInput').value);
             if (val > 0) {
                 addPushups(val);
-                input.value = '';
+                document.getElementById('customInput').value = '';
             }
         }
 
-        // Автозапуск при открытии WebApp
+        async function saveSettings() {
+            triggerHaptic();
+            const goal = parseInt(document.getElementById('settingGoal').value);
+            const reminders = document.getElementById('settingReminders').checked;
+            const interval = parseInt(document.getElementById('settingInterval').value);
+
+            await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_id: userId,
+                    goal: goal,
+                    reminders_enabled: reminders,
+                    reminder_interval_hours: interval
+                })
+            });
+            alert('Настройки сохранены!');
+            loadUserData();
+        }
+
+        async function loadCalendar() {
+            const res = await fetch(\`/api/calendar?user_id=\${userId}\`);
+            const data = await res.json();
+            const list = document.getElementById('calendarList');
+            list.innerHTML = '';
+            if (data.calendar.length === 0) {
+                list.innerHTML = '<div style="text-align:center; color:var(--text-secondary);">Записей нет</div>';
+            } else {
+                data.calendar.forEach(row => {
+                    const dateStr = new Date(row.date).toLocaleDateString();
+                    list.innerHTML += \`
+                        <div class="history-item">
+                            <span>\${dateStr}</span>
+                            <span style="font-weight:700; color:var(--accent-blue);">\${row.total} отжиманий</span>
+                        </div>\`;
+                });
+            }
+        }
+
         loadUserData();
     </script>
 </body>
