@@ -2,7 +2,7 @@ const { Telegraf, Markup } = require('telegraf');
 const { Pool } = require('pg');
 const express = require('express');
 
-const BOT_TOKEN = process.env.BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE';
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -13,20 +13,44 @@ const pool = new Pool({
     ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// --- ВПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+// --- АВТОМАТИЧЕСКАЯ ИНИЦИАЛИЗАЦИЯ ТАБЛИЦ B SUPABASE ---
+async function initDB() {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS pushups (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                username TEXT,
+                count INT NOT NULL,
+                exercise TEXT DEFAULT 'pushups',
+                type TEXT DEFAULT 'classic',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
 
+            CREATE TABLE IF NOT EXISTS settings (
+                user_id BIGINT PRIMARY KEY,
+                start_time TEXT DEFAULT '09:00',
+                end_time TEXT DEFAULT '21:00',
+                frequency INT DEFAULT 3,
+                daily_goal INT DEFAULT 100,
+                is_paused INT DEFAULT 0,
+                next_reminder TIMESTAMP WITH TIME ZONE
+            );
+        `);
+        console.log('✅ База данных Supabase готова к работе!');
+    } catch (e) {
+        console.error('❌ Ошибка инициализации БД:', e);
+    }
+}
+
+initDB();
+
+// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 async function getUserSettings(userId) {
     try {
         const res = await pool.query('SELECT * FROM settings WHERE user_id = $1', [userId]);
         if (res.rows.length === 0) {
-            const defaultSet = {
-                user_id: userId,
-                start_time: '09:00',
-                end_time: '21:00',
-                frequency: 3,
-                daily_goal: 100,
-                is_paused: 0
-            };
+            const defaultSet = { user_id: userId, start_time: '09:00', end_time: '21:00', frequency: 3, daily_goal: 100, is_paused: 0 };
             await pool.query(
                 `INSERT INTO settings (user_id, start_time, end_time, frequency, daily_goal, is_paused) 
                  VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (user_id) DO NOTHING`,
@@ -52,7 +76,6 @@ const app = express();
 app.use(express.json());
 
 // --- API ENDPOINTS ---
-
 app.post('/api/pushups', async (req, res) => {
     const { user_id, username, count, exercise, type } = req.body;
     if (!user_id || !count) return res.status(400).json({ error: 'Неверные данные' });
@@ -73,11 +96,11 @@ app.get('/api/user-summary', async (req, res) => {
         const settings = await getUserSettings(userId);
         
         const todayRes = await pool.query(
-            `SELECT SUM(count) as today_total FROM pushups WHERE user_id = $1 AND CURRENT_DATE = DATE(created_at)`,
+            `SELECT COALESCE(SUM(count), 0) as today_total FROM pushups WHERE user_id = $1 AND created_at >= CURRENT_DATE`,
             [userId]
         );
         const totalRes = await pool.query(
-            `SELECT SUM(count) as total_all, MAX(count) as max_set FROM pushups WHERE user_id = $1`,
+            `SELECT COALESCE(SUM(count), 0) as total_all, COALESCE(MAX(count), 0) as max_set FROM pushups WHERE user_id = $1`,
             [userId]
         );
 
@@ -147,8 +170,7 @@ app.post('/api/settings', async (req, res) => {
     }
 });
 
-// --- iOS MATTE GLASS HTML ИНТЕРФЕЙС MINI APP ---
-
+// --- iOS MATTE GLASS HTML ИНТЕРФЕЙС ---
 const htmlPage = `
 <!DOCTYPE html>
 <html lang="ru">
@@ -329,7 +351,6 @@ const htmlPage = `
 <body>
     <div class="ambient-blur"></div>
 
-    <!-- ГЛАВНАЯ -->
     <div id="tab-home" class="tab-content active">
         <div class="glass-card">
             <div style="display: flex; justify-content: space-between;">
@@ -367,7 +388,6 @@ const htmlPage = `
         </div>
     </div>
 
-    <!-- АНАЛИТИКА / HEATMAP -->
     <div id="tab-stats" class="tab-content">
         <div class="glass-card">
             <div class="metric-title">Тепловая карта активности (30 дней)</div>
@@ -385,7 +405,6 @@ const htmlPage = `
         </div>
     </div>
 
-    <!-- НАСТРОЙКИ -->
     <div id="tab-settings" class="tab-content">
         <div class="glass-card">
             <div class="metric-title" style="margin-bottom: 12px;">Настройки расписания</div>
@@ -410,7 +429,6 @@ const htmlPage = `
         </div>
     </div>
 
-    <!-- TABBAR -->
     <div class="tab-bar">
         <div class="tab-item active" onclick="switchTab('home', this)">
             <div style="font-size: 16px;">⚡</div>
@@ -524,7 +542,7 @@ const htmlPage = `
                     end_time: '21:00'
                 })
             });
-            tg.showPopup({ title: 'Успешно', message: 'Настройки сохранены.' });
+            if (tg.showPopup) tg.showPopup({ title: 'Успешно', message: 'Настройки сохранены.' });
             loadSummary();
         }
 
@@ -538,11 +556,11 @@ const htmlPage = `
 </html>
 `;
 
+// Все варианты маршрутов ведут к WebApp, исключая ошибку "Not Found"
 app.get('/webapp', (req, res) => res.send(htmlPage));
 app.get('/', (req, res) => res.send(htmlPage));
 
-// --- ИНТЕРАКТИВНЫЕ НАПОМИНАНИЯ И SNOOZE В TELEGRAM ---
-
+// --- ОБРАБОТКА КОМАНД И КНОПОК TELEGRAM ---
 bot.start((ctx) => {
     const webAppUrl = process.env.WEBAPP_URL || 'https://sport-ya.onrender.com/webapp';
     ctx.reply('💪 Матовый трекер подходов подключён к Supabase!\n\nВсе данные сохраняются навсегда.', {
@@ -567,7 +585,7 @@ bot.on('text', async (ctx) => {
             ctx.reply('❌ Ошибка сохранения в базу данных.');
         }
     } else {
-        ctx.reply('Отправьте число (например: 25) или нажмите на кнопку снизу.');
+        ctx.reply('Отправьте число (например: 25) или воспользуйтесь кнопкой снизу.');
     }
 });
 
@@ -579,39 +597,39 @@ bot.on('callback_query', async (ctx) => {
         if (data.startsWith('add_')) {
             const count = parseInt(data.split('_')[1]);
             await logExercise(userId, ctx.from.username || ctx.from.first_name, count, 'pushups', 'classic');
-            ctx.answerCbQuery(`Записано +${count}!`);
-            ctx.editMessageText(`✅ Отлично! Записано +${count} отжиманий.`);
+            await ctx.answerCbQuery(`Записано +${count}!`);
+            await ctx.editMessageText(`✅ Отлично! Записано +${count} отжиманий.`);
         } else if (data.startsWith('snooze_')) {
             const mins = parseInt(data.split('_')[1]);
             const nextTime = new Date(Date.now() + mins * 60 * 1000);
             
             await pool.query(`UPDATE settings SET next_reminder = $1 WHERE user_id = $2`, [nextTime, userId]);
-            ctx.answerCbQuery(`Отложено на ${mins} мин`);
-            ctx.editMessageText(`⏱ Напоминание отложено на ${mins} минут.`);
+            await ctx.answerCbQuery(`Отложено на ${mins} мин`);
+            await ctx.editMessageText(`⏱ Напоминание отложено на ${mins} минут.`);
         }
     } catch (e) {
-        ctx.answerCbQuery('Ошибка действия');
+        console.error('Ошибка обработки кнопки:', e);
+        await ctx.answerCbQuery('Ошибка действия');
     }
 });
 
-// ФОНОВЫЙ ТАЙМЕР НАПОМИНАНИЙ (Проверка каждую минуту)
+// --- ТОЧНЫЙ ТАЙМЕР НАПОМИНАНИЙ ---
 setInterval(async () => {
     try {
         const now = new Date();
-        const currentHour = now.getHours();
-
-        // Тихие часы с 22:00 до 08:00
-        if (currentHour >= 22 || currentHour < 8) return;
-
         const res = await pool.query(`SELECT * FROM settings WHERE is_paused = 0`);
+
         for (const user of res.rows) {
-            const shouldRemind = !user.next_reminder || new Date(user.next_reminder) <= now;
+            const nextReminderTime = user.next_reminder ? new Date(user.next_reminder).getTime() : 0;
+            const shouldRemind = !user.next_reminder || nextReminderTime <= now.getTime();
 
             if (shouldRemind) {
-                const nextRem = new Date(Date.now() + (user.frequency || 3) * 3600 * 1000);
+                const freqHours = user.frequency || 3;
+                const nextRem = new Date(Date.now() + freqHours * 3600 * 1000);
+
                 await pool.query(`UPDATE settings SET next_reminder = $1 WHERE user_id = $2`, [nextRem, user.user_id]);
 
-                bot.telegram.sendMessage(
+                await bot.telegram.sendMessage(
                     user.user_id,
                     '🔔 Время сделать подход! Выберите действие или отложите:',
                     Markup.inlineKeyboard([
@@ -626,11 +644,11 @@ setInterval(async () => {
                             Markup.button.callback('⏱ 1 час', 'snooze_60')
                         ]
                     ])
-                ).catch(() => {});
+                ).catch((err) => console.error('Ошибка отправки уведомления:', err.message));
             }
         }
     } catch (e) {
-        console.error('Ошибка в планировщике:', e);
+        console.error('Ошибка в фоновом планировщике:', e);
     }
 }, 60000);
 
