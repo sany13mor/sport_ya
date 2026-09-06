@@ -29,7 +29,7 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// Автоинициализация таблиц
+// Автоинициализация и миграция таблиц
 async function initDB() {
     try {
         await pool.query(`
@@ -44,8 +44,12 @@ async function initDB() {
                 goal INT DEFAULT 100,
                 reminders_enabled BOOLEAN DEFAULT true,
                 reminder_interval_hours INT DEFAULT 3,
+                reminder_start_hour INT DEFAULT 10,
+                reminder_end_hour INT DEFAULT 23,
                 last_reminder_sent TIMESTAMP WITH TIME ZONE
             );
+            ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS reminder_start_hour INT DEFAULT 10;
+            ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS reminder_end_hour INT DEFAULT 23;
         `);
         console.log('✅ База данных Supabase и таблицы готовы к работе!');
     } catch (err) {
@@ -56,7 +60,7 @@ initDB();
 
 app.use(express.json());
 
-// Планировщик напоминаний (каждые 5 минут)
+// Планировщик напоминаний с учетом временного диапазона
 setInterval(async () => {
     if (!bot) return;
     try {
@@ -64,6 +68,8 @@ setInterval(async () => {
             SELECT s.user_id, s.reminder_interval_hours 
             FROM user_settings s
             WHERE s.reminders_enabled = true 
+              AND EXTRACT(HOUR FROM NOW() AT TIMEZONE 'UTC') >= s.reminder_start_hour
+              AND EXTRACT(HOUR FROM NOW() AT TIMEZONE 'UTC') < s.reminder_end_hour
               AND (s.last_reminder_sent IS NULL OR s.last_reminder_sent < NOW() - (s.reminder_interval_hours || ' hours')::INTERVAL)
               AND NOT EXISTS (
                   SELECT 1 FROM pushups p 
@@ -131,16 +137,18 @@ app.post('/api/add', async (req, res) => {
 
 // 3. Сохранение настроек
 app.post('/api/settings', async (req, res) => {
-    const { user_id, goal, reminders_enabled, reminder_interval_hours } = req.body;
+    const { user_id, goal, reminders_enabled, reminder_interval_hours, reminder_start_hour, reminder_end_hour } = req.body;
     try {
         await pool.query(`
-            INSERT INTO user_settings (user_id, goal, reminders_enabled, reminder_interval_hours)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO user_settings (user_id, goal, reminders_enabled, reminder_interval_hours, reminder_start_hour, reminder_end_hour)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (user_id) DO UPDATE SET
                 goal = EXCLUDED.goal,
                 reminders_enabled = EXCLUDED.reminders_enabled,
-                reminder_interval_hours = EXCLUDED.reminder_interval_hours
-        `, [user_id, goal, reminders_enabled, reminder_interval_hours]);
+                reminder_interval_hours = EXCLUDED.reminder_interval_hours,
+                reminder_start_hour = EXCLUDED.reminder_start_hour,
+                reminder_end_hour = EXCLUDED.reminder_end_hour
+        `, [user_id, goal, reminders_enabled, reminder_interval_hours, reminder_start_hour, reminder_end_hour]);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Database error' });
@@ -271,7 +279,6 @@ app.get('*', (req, res) => {
         .stat-value { font-size: 24px; font-weight: 800; line-height: 1; }
         .stat-desc { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
 
-        /* Обновленные пресеты +15 +20 +25 +30 +35 */
         .presets-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
         .btn-glass {
             background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.14);
@@ -280,24 +287,25 @@ app.get('*', (req, res) => {
         }
         .btn-glass:active { transform: scale(0.92); background: rgba(255, 255, 255, 0.2); }
 
-        /* Улучшенная строка собственного ввода */
+        /* Адаптированная строка ввода собственного значения */
         .custom-input-box {
             display: flex; align-items: center; background: rgba(255, 255, 255, 0.06);
             border: 1px solid var(--glass-border); border-radius: 16px; padding: 4px 6px 4px 14px;
-            margin-top: 8px; gap: 8px;
+            margin-top: 8px; gap: 8px; width: 100%; box-sizing: border-box;
         }
         .input-glass {
-            flex: 1; background: transparent; border: none; color: #fff; font-size: 16px;
-            font-weight: 600; outline: none;
+            flex: 1; min-width: 0; background: transparent; border: none; color: #fff; font-size: 15px;
+            font-weight: 600; outline: none; padding: 10px 0;
         }
         .input-glass::placeholder { color: var(--text-secondary); font-weight: 400; font-size: 14px; }
         .btn-add-action {
             background: linear-gradient(135deg, var(--accent-green), #249d42);
             border: none; border-radius: 12px; padding: 10px 18px; color: #fff;
-            font-weight: 700; font-size: 14px; cursor: pointer;
+            font-weight: 700; font-size: 14px; cursor: pointer; flex-shrink: 0;
+            transition: transform 0.1s ease;
         }
+        .btn-add-action:active { transform: scale(0.94); opacity: 0.9; }
 
-        /* Компактный аккуратный блок подходов */
         .compact-history-card { padding: 12px 14px; }
         .history-list { display: flex; flex-direction: column; gap: 6px; max-height: 140px; overflow-y: auto; }
         .history-item-compact {
@@ -306,7 +314,6 @@ app.get('*', (req, res) => {
             border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.05); font-size: 13px;
         }
 
-        /* Реальный Календарь на Год */
         .calendar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
         .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; text-align: center; }
         .day-name { font-size: 10px; color: var(--text-secondary); font-weight: 600; padding-bottom: 4px; }
@@ -320,7 +327,6 @@ app.get('*', (req, res) => {
         .day-cell.completed { background: rgba(48, 209, 88, 0.35); border-color: var(--accent-green); color: #fff; }
         .day-cell.today { border-color: var(--accent-blue); }
 
-        /* Таббар iOS */
         .tab-bar {
             position: fixed; bottom: 0; left: 0; right: 0;
             background: rgba(18, 18, 18, 0.88); backdrop-filter: blur(25px);
@@ -336,12 +342,11 @@ app.get('*', (req, res) => {
         .tab-content { display: none; }
         .tab-content.active { display: flex; flex-direction: column; gap: 14px; }
 
-        /* Увеличенные удобные настройки */
         .settings-group { display: flex; flex-direction: column; gap: 12px; }
         .setting-card-item {
             display: flex; justify-content: space-between; align-items: center;
             padding: 14px 16px; background: rgba(255, 255, 255, 0.04);
-            border: 1px solid var(--glass-border); border-radius: 14px;
+            border: 1px solid var(--glass-border); border-radius: 14px; gap: 12px;
         }
         .select-glass {
             background: rgba(255, 255, 255, 0.1); border: 1px solid var(--glass-border);
@@ -405,14 +410,12 @@ app.get('*', (req, res) => {
                 <button class="btn-glass" onclick="addPushups(35)">+35</button>
             </div>
 
-            <!-- Удобная строка ввода собственного количества -->
             <div class="custom-input-box">
                 <input type="number" id="customInput" class="input-glass" placeholder="Введите своё число..." min="1">
                 <button class="btn-add-action" onclick="addCustom()">Записать</button>
             </div>
         </div>
 
-        <!-- Компактный аккуратный блок с сегодняшниними подходами -->
         <div class="glass-card compact-history-card">
             <div class="title-sub" style="margin-bottom: 8px;">Сегодняшние подходы</div>
             <div class="history-list" id="historyList"></div>
@@ -461,7 +464,7 @@ app.get('*', (req, res) => {
         </div>
     </div>
 
-    <!-- Вкладка 4: Удобный и крупный блок настроек -->
+    <!-- Вкладка 4: Настройки -->
     <div id="tab-settings" class="tab-content">
         <div class="glass-card">
             <div class="title-sub" style="margin-bottom: 14px;">Параметры тренировок</div>
@@ -486,7 +489,7 @@ app.get('*', (req, res) => {
                 <div class="setting-card-item">
                     <div>
                         <div style="font-weight:600; font-size:15px;">Интервал уведомлений</div>
-                        <div style="font-size:12px; color:var(--text-secondary);">Частота отправки сообщений</div>
+                        <div style="font-size:12px; color:var(--text-secondary);">Частота отправки</div>
                     </div>
                     <select id="settingInterval" class="select-glass">
                         <option value="1">Каждый 1 час</option>
@@ -495,6 +498,19 @@ app.get('*', (req, res) => {
                         <option value="4">Каждые 4 часа</option>
                         <option value="6">Каждые 6 часов</option>
                     </select>
+                </div>
+
+                <!-- Диапазон времени работы пушей -->
+                <div class="setting-card-item">
+                    <div>
+                        <div style="font-weight:600; font-size:15px;">Диапазон времени</div>
+                        <div style="font-size:12px; color:var(--text-secondary);">Часы активности бота</div>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:6px;">
+                        <select id="settingStartHour" class="select-glass"></select>
+                        <span style="font-size:12px; color:var(--text-secondary);">—</span>
+                        <select id="settingEndHour" class="select-glass"></select>
+                    </div>
                 </div>
 
                 <button class="btn-add-action" style="width:100%; padding:14px; margin-top:6px;" onclick="saveSettings()">Сохранить настройки</button>
@@ -539,6 +555,21 @@ app.get('*', (req, res) => {
         let yearDataMap = {};
         let weeklyChartInstance, monthlyChartInstance;
 
+        // Заполнение селектов времени (00:00 - 23:00)
+        function initTimeSelects() {
+            const startSelect = document.getElementById('settingStartHour');
+            const endSelect = document.getElementById('settingEndHour');
+            startSelect.innerHTML = '';
+            endSelect.innerHTML = '';
+
+            for (let i = 0; i < 24; i++) {
+                const hourStr = String(i).padStart(2, '0') + ':00';
+                startSelect.innerHTML += \`<option value="\${i}">\${hourStr}</option>\`;
+                endSelect.innerHTML += \`<option value="\${i}">\${hourStr}</option>\`;
+            }
+        }
+        initTimeSelects();
+
         function triggerHaptic() {
             if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
         }
@@ -566,6 +597,8 @@ app.get('*', (req, res) => {
                     document.getElementById('settingGoal').value = userGoal;
                     document.getElementById('settingReminders').checked = data.settings.reminders_enabled;
                     document.getElementById('settingInterval').value = data.settings.reminder_interval_hours || 3;
+                    document.getElementById('settingStartHour').value = data.settings.reminder_start_hour ?? 10;
+                    document.getElementById('settingEndHour').value = data.settings.reminder_end_hour ?? 23;
 
                     let todayTotal = 0;
                     const historyList = document.getElementById('historyList');
@@ -620,6 +653,8 @@ app.get('*', (req, res) => {
             const goal = parseInt(document.getElementById('settingGoal').value);
             const reminders = document.getElementById('settingReminders').checked;
             const interval = parseInt(document.getElementById('settingInterval').value);
+            const startHour = parseInt(document.getElementById('settingStartHour').value);
+            const endHour = parseInt(document.getElementById('settingEndHour').value);
 
             await fetch('/api/settings', {
                 method: 'POST',
@@ -628,14 +663,16 @@ app.get('*', (req, res) => {
                     user_id: userId,
                     goal: goal,
                     reminders_enabled: reminders,
-                    reminder_interval_hours: interval
+                    reminder_interval_hours: interval,
+                    reminder_start_hour: startHour,
+                    reminder_end_hour: endHour
                 })
             });
             alert('Настройки успешно сохранены!');
             loadUserData();
         }
 
-        // --- Логика Календаря ---
+        // --- Календарь ---
         async function loadYearCalendar() {
             const year = currentDate.getFullYear();
             const res = await fetch(\`/api/calendar-year?user_id=\${userId}&year=\${year}\`);
@@ -659,7 +696,7 @@ app.get('*', (req, res) => {
             document.getElementById('calendarMonthYear').innerText = \`\${monthNames[month]} \${year}\`;
 
             const firstDay = new Date(year, month, 1).getDay();
-            const startingDay = firstDay === 0 ? 6 : firstDay - 1; // Коррекция для Пн=0
+            const startingDay = firstDay === 0 ? 6 : firstDay - 1;
             const totalDays = new Date(year, month + 1, 0).getDate();
 
             const grid = document.getElementById('calendarGrid');
@@ -683,7 +720,6 @@ app.get('*', (req, res) => {
                     classes += dayData.total >= userGoal ? ' completed' : ' has-data';
                 }
 
-                const totalVal = dayData ? dayData.total : '';
                 grid.innerHTML += \`
                     <div class="\${classes}" onclick="selectCalendarDay('\${dateKey}', \${dayData ? dayData.total : 0}, \${dayData ? dayData.sets : 0})">
                         <span>\${day}</span>
@@ -700,14 +736,13 @@ app.get('*', (req, res) => {
             document.getElementById('selectedDateSets').innerText = \`Выполнено подходов: \${sets}\`;
         }
 
-        // --- Логика Графиков (Chart.js) ---
+        // --- Графики ---
         async function loadCharts() {
             const res = await fetch(\`/api/stats-charts?user_id=\${userId}\`);
             const data = await res.json();
 
             if (!data.success) return;
 
-            // 7 дней
             const wLabels = data.weekly.map(i => i.day_label);
             const wTotals = data.weekly.map(i => i.total);
 
@@ -732,7 +767,6 @@ app.get('*', (req, res) => {
                 }
             });
 
-            // 30 дней
             const mLabels = data.monthly.map(i => i.day_label);
             const mTotals = data.monthly.map(i => i.total);
 
