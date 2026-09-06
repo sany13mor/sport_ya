@@ -41,8 +41,8 @@ initDB();
 
 app.use(express.json());
 
-// Отдача iOS WebApp интерфейса
-app.get('/', (req, res) => {
+// Отдача iOS WebApp интерфейса по любому пути (/, /webapp и т.д.)
+app.get('*', (req, res) => {
     res.send(`
 <!DOCTYPE html>
 <html lang="ru">
