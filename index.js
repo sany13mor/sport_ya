@@ -29,9 +29,17 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
+// Автоматическое создание таблицы в БД
 async function initDB() {
     try {
-        await pool.query('SELECT NOW()');
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS pushups (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                count INT NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+        `);
         console.log('✅ База данных Supabase готова к работе!');
     } catch (err) {
         console.error('❌ Ошибка инициализации БД:', err);
@@ -41,7 +49,43 @@ initDB();
 
 app.use(express.json());
 
-// Отдача iOS WebApp интерфейса по любому пути (/, /webapp и т.д.)
+// --- API МАРШРУТЫ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ---
+
+// 1. Получение статистики пользователя за сегодня
+app.get('/api/stats', async (req, res) => {
+    const userId = req.query.user_id;
+    if (!userId) return res.status(400).json({ error: 'User ID required' });
+
+    try {
+        const query = `
+            SELECT id, count, created_at 
+            FROM pushups 
+            WHERE user_id = $1 AND created_at >= CURRENT_DATE 
+            ORDER BY created_at DESC
+        `;
+        const result = await pool.query(query, [userId]);
+        res.json({ success: true, history: result.rows });
+    } catch (err) {
+        console.error('Ошибка получения данных из БД:', err);
+        res.status(500).json({ error: 'Database error' });
+    }
+});
+
+// 2. Сохранение нового подхода в БД
+app.post('/api/add', async (req, res) => {
+    const { user_id, count } = req.body;
+    if (!user_id || !count) return res.status(400).json({ error: 'Invalid data' });
+
+    try {
+        await pool.query('INSERT INTO pushups (user_id, count) VALUES ($1, $2)', [user_id, count]);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Ошибка записи в БД:', err);
+        res.status(500).json({ error: 'Database error' });
+    }
+});
+
+// --- ВЕБ-ИНТЕРФЕЙС WEB APP ---
 app.get('*', (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -223,7 +267,7 @@ app.get('*', (req, res) => {
         <div class="title-sub" style="margin-bottom: 12px;">Сегодняшние подходы</div>
         <div class="history-list" id="historyList">
             <div style="text-align: center; color: var(--text-secondary); padding: 10px; font-size: 14px;">
-                Подходов пока нет
+                Загрузка данных...
             </div>
         </div>
     </div>
@@ -234,6 +278,8 @@ app.get('*', (req, res) => {
         tg.ready();
 
         const user = tg.initDataUnsafe?.user;
+        const userId = user ? user.id : 999999; // Фолбэк для тестов вне Telegram
+
         if (user) {
             document.getElementById('userName').innerText = user.first_name || 'Спортсмен';
             document.getElementById('userAvatar').innerText = (user.first_name || 'U')[0].toUpperCase();
@@ -249,10 +295,45 @@ app.get('*', (req, res) => {
             }
         }
 
-        function updateProgress(count) {
-            todayTotal += count;
-            sets += 1;
-            
+        // Загрузка сохраненных подходов из базы Supabase
+        async function loadUserData() {
+            try {
+                const response = await fetch(\`/api/stats?user_id=\${userId}\`);
+                const data = await response.json();
+
+                if (data.success) {
+                    const historyList = document.getElementById('historyList');
+                    historyList.innerHTML = '';
+
+                    todayTotal = 0;
+                    sets = data.history.length;
+
+                    if (sets === 0) {
+                        historyList.innerHTML = \`<div style="text-align: center; color: var(--text-secondary); padding: 10px; font-size: 14px;">Подходов пока нет</div>\`;
+                    } else {
+                        data.history.forEach(row => {
+                            todayTotal += row.count;
+                            const date = new Date(row.created_at);
+                            const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                            const item = document.createElement('div');
+                            item.className = 'history-item';
+                            item.innerHTML = \`
+                                <span class="history-count">+\${row.count} отжиманий</span>
+                                <span class="history-time">\${timeStr}</span>
+                            \`;
+                            historyList.appendChild(item);
+                        });
+                    }
+
+                    renderUI();
+                }
+            } catch (err) {
+                console.error('Ошибка загрузки:', err);
+            }
+        }
+
+        function renderUI() {
             document.getElementById('todayCount').innerHTML = \`\${todayTotal} <span>/ \${goal}</span>\`;
             document.getElementById('setsCount').innerText = sets;
 
@@ -263,30 +344,24 @@ app.get('*', (req, res) => {
             const circumference = 2 * Math.PI * 45;
             const offset = circumference - (percent / 100) * circumference;
             circle.style.strokeDashoffset = offset;
-
-            const historyList = document.getElementById('historyList');
-            if (sets === 1) historyList.innerHTML = '';
-
-            const now = new Date();
-            const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-            const item = document.createElement('div');
-            item.className = 'history-item';
-            item.innerHTML = \`
-                <span class="history-count">+\${count} отжиманий</span>
-                <span class="history-time">\${timeStr}</span>
-            \`;
-            historyList.prepend(item);
         }
 
-        function addPushups(count) {
+        async function addPushups(count) {
             triggerHaptic();
-            updateProgress(count);
             
-            tg.sendData(JSON.stringify({
-                action: 'add_pushups',
-                count: count
-            }));
+            // Отправляем запись прямо в БД Supabase
+            try {
+                await fetch('/api/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: userId, count: count })
+                });
+
+                // Перезагружаем список, чтобы подтянуть точные данные из БД
+                loadUserData();
+            } catch (err) {
+                console.error('Ошибка сохранения:', err);
+            }
         }
 
         function addCustom() {
@@ -297,6 +372,9 @@ app.get('*', (req, res) => {
                 input.value = '';
             }
         }
+
+        // Автозапуск при открытии WebApp
+        loadUserData();
     </script>
 </body>
 </html>
