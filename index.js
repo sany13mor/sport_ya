@@ -6,7 +6,6 @@ const port = process.env.PORT || 3000;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const BOT_TOKEN = process.env.BOT_TOKEN;
 
 const supabase = (SUPABASE_URL && SUPABASE_KEY && SUPABASE_URL.startsWith('http')) 
     ? createClient(SUPABASE_URL, SUPABASE_KEY) 
@@ -23,13 +22,13 @@ const inMemoryStore = {
 // Проверка соединения с Supabase при старте сервера
 async function testSupabaseConnection() {
     if (!supabase) {
-        console.log('⚠️ Supabase клиент не инициализирован: проверьте переменные SUPABASE_URL и SUPABASE_KEY на хостинге.');
+        console.log('⚠️ Supabase клиент не инициализирован: проверьте переменные SUPABASE_URL и SUPABASE_KEY.');
         return;
     }
     try {
         const { error } = await supabase.from('pushups').select('id').limit(1);
         if (error) {
-            console.error('❌ Ошибка связи с Supabase (возможно, включен RLS или не созданы таблицы):', error.message);
+            console.error('❌ Ошибка связи с Supabase:', error.message);
         } else {
             console.log('✅ Успешное подключение к Supabase! База данных полностью доступна.');
         }
@@ -40,7 +39,6 @@ async function testSupabaseConnection() {
 
 testSupabaseConnection();
 
-// Безопасное прерывание / парсинг Telegram ID (поддержка браузера и Telegram WebApp)
 function parseTelegramId(rawId) {
     if (!rawId || rawId === 'demo_user') {
         return 356582454; 
@@ -77,13 +75,13 @@ app.get('/api/user-data', async (req, res) => {
         try {
             const { data } = await supabase.from('user_settings').select('*').eq('user_id', userIdStr).maybeSingle();
             settingsData = data;
-        } catch (e) { console.error('Настроек нет'); }
+        } catch (e) {}
 
         let profileData = null;
         try {
             const { data } = await supabase.from('user_profiles').select('*').eq('user_id', userIdStr).maybeSingle();
             profileData = data;
-        } catch (e) { console.error('Профиля нет'); }
+        } catch (e) {}
 
         res.json({
             status: 'ok',
@@ -203,7 +201,6 @@ app.post('/api/save-profile', async (req, res) => {
     }
 });
 
-// HTML-интерфейс с полной адаптацией под мобильные экраны и безопасные зоны (Safe Areas)
 const HTML_PAGE = `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -358,10 +355,12 @@ const HTML_PAGE = `<!DOCTYPE html>
         .input-group {
             display: flex;
             gap: 8px;
+            width: 100%;
         }
 
         .glass-input {
             flex: 1;
+            min-width: 0;
             background: var(--glass-lighter);
             border: none;
             border-radius: 12px;
@@ -561,10 +560,12 @@ const HTML_PAGE = `<!DOCTYPE html>
             font-weight: 600;
             cursor: pointer;
             width: 25%;
+            padding: 4px 0;
         }
 
         .nav-item.active { color: var(--primary); }
-        .nav-icon { width: 24px; height: 24px; }
+        .nav-icon { width: 24px; height: 24px; pointer-events: none; }
+        .nav-item span { pointer-events: none; }
         
         .toggle-switch {
             width: 50px; height: 28px;
@@ -747,19 +748,19 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     <!-- Нижняя навигация -->
     <div class="bottom-nav">
-        <div class="nav-item active" onclick="switchTab('main', event)">
+        <div class="nav-item active" onclick="switchTab('main', this)">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
             <span>Главная</span>
         </div>
-        <div class="nav-item" onclick="switchTab('calendar', event)">
+        <div class="nav-item" onclick="switchTab('calendar', this)">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11z"/></svg>
             <span>Календарь</span>
         </div>
-        <div class="nav-item" onclick="switchTab('progress', event)">
+        <div class="nav-item" onclick="switchTab('progress', this)">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
             <span>Прогресс</span>
         </div>
-        <div class="nav-item" onclick="switchTab('settings', event)">
+        <div class="nav-item" onclick="switchTab('settings', this)">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
             <span>Настройки</span>
         </div>
@@ -786,13 +787,13 @@ const HTML_PAGE = `<!DOCTYPE html>
         if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
     }
 
-    function switchTab(tab, event) {
+    function switchTab(tab, element) {
         triggerHaptic();
         document.querySelectorAll('.screen').forEach(function(el) { el.classList.remove('active'); });
         document.querySelectorAll('.nav-item').forEach(function(el) { el.classList.remove('active'); });
         document.getElementById('screen-' + tab).classList.add('active');
-        if (event && event.currentTarget) {
-            event.currentTarget.classList.add('active');
+        if (element) {
+            element.classList.add('active');
         }
         if (tab === 'calendar') {
             renderCalendar();
@@ -871,7 +872,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                     '<span style="color: var(--accent-green); font-size: 16px; font-weight: 800;">+' + item.count + '</span>' +
                     '<div style="display: flex; gap: 12px; align-items: center;">' +
                         '<span style="color: var(--text-secondary); font-size: 14px;">' + timeStr + '</span>' +
-                        '<button style="background: none; border: none; color: #555; padding: 4px; font-size: 16px;" onclick="deleteSet(\'' + item.id + '\')">✕</button>' +
+                        '<button style="background: none; border: none; color: #555; padding: 4px; font-size: 16px;" onclick="deleteSet(\\'' + item.id + '\\')">✕</button>' +
                     '</div>' +
                 '</div>';
             });
