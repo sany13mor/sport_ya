@@ -194,21 +194,19 @@ const HTML_PAGE = `<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>Fitness</title>
+    <title>Fitness Tracker</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         :root {
-            --bg-color: #000000;
-            --card-bg: #1C1C1E;
-            --card-bg-light: #2C2C2E;
+            --primary: #0A84FF;
+            --primary-light: #30B0FF;
+            --accent-green: #34C759;
+            --bg-main: #000000;
+            --glass-light: #1A1A1C;
+            --glass-lighter: #2C2C2E;
             --text-primary: #FFFFFF;
             --text-secondary: #8E8E93;
-            --text-tertiary: #48484A;
-            --ring-red: #FF2D55;
-            --ring-green: #34C759;
-            --ring-blue: #0A84FF;
-            --ring-orange: #FF9500;
-            --accent-green: #34C759;
+            --text-tertiary: #5A5A5E;
         }
 
         * {
@@ -216,13 +214,13 @@ const HTML_PAGE = `<!DOCTYPE html>
             padding: 0;
             box-sizing: border-box;
             -webkit-tap-highlight-color: transparent;
-            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
         }
 
         html, body {
             width: 100%;
             height: 100%;
-            background-color: var(--bg-color);
+            background-color: var(--bg-main);
             color: var(--text-primary);
             overflow: hidden;
             position: fixed;
@@ -243,211 +241,216 @@ const HTML_PAGE = `<!DOCTYPE html>
             -webkit-overflow-scrolling: touch;
         }
 
-        .screen { display: none; animation: fadeIn 0.15s ease; }
+        .screen { display: none; animation: fadeIn 0.2s ease; }
         .screen.active { display: block; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
-        /* Apple Fitness Large Header Style */
-        .page-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-end;
-            margin-bottom: 20px;
-            padding-top: 8px;
-        }
-        .page-title {
-            font-size: 34px;
-            font-weight: 800;
-            letter-spacing: 0.38px;
-            color: var(--text-primary);
-        }
-
-        /* Apple Fitness Cards */
-        .fitness-card {
-            background: var(--card-bg);
+        .glass-card {
+            background: var(--glass-light);
+            border: 1px solid rgba(255, 255, 255, 0.05);
             border-radius: 20px;
             padding: 16px;
-            margin-bottom: 14px;
-            border: 1px solid rgba(255, 255, 255, 0.04);
+            margin-bottom: 12px;
         }
 
-        .section-header {
-            font-size: 13px;
+        .header-top {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .header-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #0A84FF, #34C759);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .section-title {
+            font-size: 11px;
             color: var(--text-secondary);
             text-transform: uppercase;
-            letter-spacing: 0.8px;
+            letter-spacing: 0.5px;
             margin-bottom: 12px;
             font-weight: 600;
         }
 
-        /* Concentric Activity Rings widget */
-        .rings-container {
-            display: flex;
-            align-items: center;
-            gap: 20px;
-        }
-        .rings-graphic {
+        .progress-ring-container {
             position: relative;
-            width: 96px;
-            height: 96px;
+            width: 80px;
+            height: 80px;
             flex-shrink: 0;
         }
-        .ring-svg {
+
+        .progress-ring-svg {
             width: 100%;
             height: 100%;
             transform: rotate(-90deg);
         }
-        .ring-bg {
+
+        .progress-ring-bg {
+            stroke: var(--glass-lighter);
+            stroke-width: 8;
             fill: none;
-            stroke-width: 9;
-            stroke: rgba(255, 255, 255, 0.1);
         }
-        .ring-fill {
+
+        .progress-ring-fill {
+            stroke: var(--primary);
+            stroke-width: 8;
             fill: none;
-            stroke-width: 9;
             stroke-linecap: round;
-            transition: stroke-dashoffset 0.5s ease;
+            stroke-dasharray: 226;
+            stroke-dashoffset: 226;
+            transition: stroke-dashoffset 0.4s ease;
         }
-        .ring-center-icon {
+
+        .progress-ring-text {
             position: absolute;
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            font-size: 20px;
+            font-size: 18px;
+            font-weight: 800;
         }
 
-        .ring-metrics {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        .metric-row {
-            display: flex;
-            flex-direction: column;
-        }
-        .metric-label {
-            font-size: 13px;
-            font-weight: 700;
-            display: flex;
-            justify-content: space-between;
-        }
-        .metric-val {
-            font-size: 15px;
-            font-weight: 600;
-            color: var(--text-secondary);
-        }
-
-        /* Quick actions pills */
-        .quick-grid {
+        .quick-actions {
             display: grid;
             grid-template-columns: repeat(5, 1fr);
             gap: 8px;
             margin-bottom: 12px;
         }
-        .quick-pill {
-            background: var(--card-bg-light);
+
+        .quick-btn {
+            background: var(--glass-lighter);
             border: none;
-            border-radius: 14px;
+            border-radius: 12px;
             padding: 12px 0;
             color: var(--text-primary);
             font-weight: 700;
-            font-size: 15px;
+            font-size: 14px;
             cursor: pointer;
-            text-align: center;
-            transition: transform 0.1s, background 0.15s;
+            transition: background 0.15s;
         }
-        .quick-pill:active { transform: scale(0.94); background: #3a3a3c; }
+        
+        .quick-btn:active { background: #3a3a3c; transform: scale(0.96); }
 
-        .input-row {
+        .input-group {
             display: flex;
-            gap: 10px;
+            gap: 8px;
         }
-        .ios-input {
+
+        .glass-input {
             flex: 1;
-            background: var(--card-bg-light);
+            background: var(--glass-lighter);
             border: none;
-            border-radius: 14px;
-            padding: 14px 16px;
+            border-radius: 12px;
+            padding: 12px 16px;
             color: var(--text-primary);
-            font-size: 16px;
+            font-size: 15px;
             outline: none;
         }
-        .ios-input::placeholder { color: var(--text-secondary); }
 
-        .btn-action {
-            background: var(--ring-green);
+        .glass-input::placeholder { color: var(--text-tertiary); }
+
+        .btn-green {
+            background: var(--accent-green);
             border: none;
-            border-radius: 14px;
-            padding: 0 22px;
+            border-radius: 12px;
+            padding: 12px 20px;
             color: #000;
             font-weight: 700;
             font-size: 15px;
             cursor: pointer;
             flex-shrink: 0;
-            transition: transform 0.1s;
         }
-        .btn-action:active { transform: scale(0.94); opacity: 0.85; }
+        
+        .btn-green:active { opacity: 0.8; transform: scale(0.96); }
 
-        .exercise-row {
-            background: var(--card-bg-light);
-            border-radius: 14px;
+        .exercise-item {
+            background: var(--glass-lighter);
+            border-radius: 12px;
             padding: 12px 16px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 8px;
         }
-        .exercise-row:last-child { margin-bottom: 0; }
+        .exercise-item:last-child { margin-bottom: 0; }
 
-        /* Calendar Styles */
-        .cal-header-row {
+        .form-group { margin-bottom: 16px; }
+        .form-label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .form-input, .form-select {
+            width: 100%;
+            background: var(--glass-lighter);
+            border: none;
+            border-radius: 12px;
+            padding: 12px 16px;
+            color: var(--text-primary);
+            font-size: 16px;
+            outline: none;
+        }
+
+        /* Calendar Grid Styles */
+        .calendar-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 16px;
+            margin-bottom: 12px;
             font-weight: 700;
-            font-size: 18px;
+            font-size: 16px;
         }
-        .cal-grid {
+        .calendar-grid {
             display: grid;
             grid-template-columns: repeat(7, 1fr);
             gap: 6px;
             text-align: center;
         }
-        .cal-wd {
+        .calendar-weekday {
             font-size: 11px;
             color: var(--text-secondary);
             font-weight: 600;
-            padding-bottom: 6px;
+            padding-bottom: 4px;
         }
-        .cal-day {
+        .calendar-day {
             aspect-ratio: 1;
-            background: var(--card-bg-light);
-            border-radius: 12px;
+            background: var(--glass-lighter);
+            border-radius: 10px;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 600;
             position: relative;
         }
-        .cal-day.empty { background: transparent; }
-        .cal-day.completed {
+        .calendar-day.empty { background: transparent; }
+        .calendar-day.completed {
             background: rgba(52, 199, 89, 0.2);
-            border: 1px solid var(--ring-green);
-            color: var(--ring-green);
+            border: 1px solid var(--accent-green);
+            color: var(--accent-green);
         }
-        .cal-day.today {
-            border: 1.5px solid var(--ring-blue);
+        .calendar-day.today {
+            border: 1px solid var(--primary);
         }
 
-        /* Analytics & Charts */
+        /* Chart & Stats Styles */
         .chart-tabs {
             display: flex;
-            background: var(--card-bg-light);
-            border-radius: 12px;
+            background: var(--glass-lighter);
+            border-radius: 10px;
             padding: 3px;
             margin-bottom: 16px;
         }
@@ -455,125 +458,90 @@ const HTML_PAGE = `<!DOCTYPE html>
             flex: 1;
             text-align: center;
             padding: 8px;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
             color: var(--text-secondary);
-            border-radius: 10px;
+            border-radius: 8px;
             cursor: pointer;
             transition: 0.2s;
         }
         .chart-tab.active {
-            background: var(--card-bg);
+            background: var(--glass-light);
             color: var(--text-primary);
         }
-        .stats-2col {
+        .stats-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 10px;
             margin-bottom: 12px;
         }
-        .stat-card-inner {
-            background: var(--card-bg-light);
-            border-radius: 16px;
-            padding: 14px;
+        .stat-box {
+            background: var(--glass-lighter);
+            border-radius: 14px;
+            padding: 12px;
         }
-        .stat-num {
-            font-size: 22px;
+        .stat-value {
+            font-size: 20px;
             font-weight: 800;
-            margin-top: 6px;
+            margin-top: 4px;
             color: var(--text-primary);
         }
-        .chart-bars-box {
+        .chart-container {
             width: 100%;
             height: 180px;
             display: flex;
             align-items: flex-end;
             gap: 6px;
             padding-top: 20px;
+            position: relative;
         }
-        .bar-wrapper {
+        .chart-bar-wrap {
             flex: 1;
             height: 100%;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: flex-end;
+            position: relative;
         }
-        .bar-column {
+        .chart-bar {
             width: 100%;
-            max-width: 22px;
-            background: var(--card-bg-light);
+            max-width: 24px;
+            background: var(--glass-lighter);
             border-radius: 6px 6px 0 0;
             transition: height 0.4s ease;
+            position: relative;
         }
-        .bar-column.filled { background: linear-gradient(180deg, var(--ring-green), #248a3d); }
-        .bar-column.active-bar { background: linear-gradient(180deg, var(--ring-red), #c91c3f); }
-        .bar-lbl {
+        .chart-bar.filled {
+            background: linear-gradient(180deg, var(--accent-green), #248a3d);
+        }
+        .chart-bar.active-day {
+            background: linear-gradient(180deg, var(--primary), var(--primary-light));
+        }
+        .chart-label {
             font-size: 10px;
             color: var(--text-secondary);
             margin-top: 6px;
             text-align: center;
         }
 
-        /* Settings Form Styles */
-        .form-item { margin-bottom: 16px; }
-        .form-label-top {
-            display: block;
-            font-size: 12px;
-            color: var(--text-secondary);
-            margin-bottom: 8px;
-            text-transform: uppercase;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-        }
-        .form-control {
-            width: 100%;
-            background: var(--card-bg-light);
-            border: none;
-            border-radius: 14px;
-            padding: 14px 16px;
-            color: var(--text-primary);
-            font-size: 16px;
-            outline: none;
-        }
-
-        .toggle-wrap {
-            width: 52px; height: 30px;
-            background: var(--card-bg-light);
-            border-radius: 15px;
-            position: relative;
-            cursor: pointer;
-            transition: 0.3s;
-        }
-        .toggle-wrap.on { background: var(--ring-green); }
-        .toggle-circle {
-            width: 26px; height: 26px;
-            background: white; border-radius: 50%;
-            position: absolute; top: 2px; left: 2px;
-            transition: 0.3s;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
-        }
-        .toggle-wrap.on .toggle-circle { left: 24px; }
-
-        /* Apple Fitness Bottom Navigation Bar */
-        .apple-nav {
+        .bottom-nav {
             position: fixed;
             bottom: 0;
             left: 0;
             right: 0;
-            height: 80px;
-            background: rgba(28, 28, 30, 0.92);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
+            height: 75px;
+            background: var(--glass-light);
             display: flex;
             justify-content: space-around;
             align-items: flex-start;
             padding-top: 10px;
-            border-top: 0.5px solid rgba(255, 255, 255, 0.15);
+            border-top: 1px solid rgba(255,255,255,0.05);
             padding-bottom: env(safe-area-inset-bottom);
             z-index: 100;
         }
-        .nav-btn {
+
+        .nav-item {
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -583,11 +551,27 @@ const HTML_PAGE = `<!DOCTYPE html>
             font-weight: 600;
             cursor: pointer;
             width: 25%;
-            background: none;
-            border: none;
         }
-        .nav-btn.active { color: var(--ring-green); }
-        .nav-icon { width: 26px; height: 26px; fill: currentColor; }
+
+        .nav-item.active { color: var(--primary); }
+        .nav-icon { width: 24px; height: 24px; }
+        
+        .toggle-switch {
+            width: 50px; height: 28px;
+            background: var(--glass-lighter);
+            border-radius: 14px;
+            position: relative;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+        .toggle-switch.on { background: var(--accent-green); }
+        .toggle-knob {
+            width: 24px; height: 24px;
+            background: white; border-radius: 50%;
+            position: absolute; top: 2px; left: 2px;
+            transition: 0.3s;
+        }
+        .toggle-switch.on .toggle-knob { left: 24px; }
     </style>
 </head>
 <body>
@@ -595,132 +579,116 @@ const HTML_PAGE = `<!DOCTYPE html>
 <div class="app-wrapper">
     <div class="content-area">
         
-        <!-- СВОДКА (SUMMARY) -->
-        <div id="screen-summary" class="screen active">
-            <div class="page-header">
-                <div class="page-title">Summary</div>
-                <div style="font-size: 13px; color: var(--text-secondary); font-weight: 600;" id="current-date-header"></div>
+        <!-- ГЛАВНАЯ ЭКРАН -->
+        <div id="screen-main" class="screen active">
+            <div class="glass-card header-top">
+                <div class="header-icon">🏋️</div>
+                <div>
+                    <div style="font-size: 10px; color: var(--text-secondary); letter-spacing: 1px; font-weight: 700;">IOS FITNESS TRACKER</div>
+                    <div style="font-size: 20px; font-weight: 700;">Отжимания</div>
+                </div>
             </div>
 
-            <div class="fitness-card">
-                <div class="section-header">Activity</div>
-                <div class="rings-container">
-                    <div class="rings-graphic">
-                        <svg class="ring-svg" viewBox="0 0 100 100">
-                            <circle class="ring-bg" cx="50" cy="50" r="42" style="stroke: rgba(255,45,85,0.15);"></circle>
-                            <circle id="ring-move" class="ring-fill" cx="50" cy="50" r="42" style="stroke: var(--ring-red); stroke-dasharray: 264; stroke-dashoffset: 264;"></circle>
-                            <circle class="ring-bg" cx="50" cy="50" r="32" style="stroke: rgba(52,199,89,0.15);"></circle>
-                            <circle id="ring-exercise" class="ring-fill" cx="50" cy="50" r="32" style="stroke: var(--ring-green); stroke-dasharray: 201; stroke-dashoffset: 201;"></circle>
+            <div class="glass-card">
+                <div class="section-title">Дневной прогресс</div>
+                <div style="display: flex; align-items: center; gap: 20px;">
+                    <div class="progress-ring-container">
+                        <svg class="progress-ring-svg" viewBox="0 0 80 80">
+                            <circle class="progress-ring-bg" cx="40" cy="40" r="36"></circle>
+                            <circle id="ring-progress" class="progress-ring-fill" cx="40" cy="40" r="36"></circle>
                         </svg>
-                        <div class="ring-center-icon">🔥</div>
+                        <div class="progress-ring-text" id="ring-pct">0%</div>
                     </div>
-                    <div class="ring-metrics">
-                        <div class="metric-row">
-                            <div class="metric-label" style="color: var(--ring-red);">
-                                <span>Move</span>
-                                <span id="today-total-ui">0 / 100</span>
-                            </div>
-                            <div class="metric-val">повторений сегодня</div>
-                        </div>
-                        <div class="metric-row" style="margin-top: 4px;">
-                            <div class="metric-label" style="color: var(--ring-green);">
-                                <span>Sets</span>
-                                <span id="today-sets-count-ui">0</span>
-                            </div>
-                            <div class="metric-val">выполнено подходов</div>
-                        </div>
+                    <div style="flex: 1;">
+                        <div style="font-size: 24px; font-weight: 800;" id="today-total-ui">0 <span style="font-size: 14px; color: var(--text-secondary); font-weight: 600;">/ <span id="goal-display">100</span></span></div>
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">Отжиманий сегодня</div>
+                        <div style="font-size: 20px; font-weight: 800; color: var(--primary);" id="today-sets-count-ui">0</div>
+                        <div style="font-size: 12px; color: var(--text-secondary);">Выполнено подходов</div>
                     </div>
                 </div>
             </div>
 
-            <div class="fitness-card">
-                <div class="section-header">Быстрый ввод</div>
-                <div class="quick-grid">
-                    <button class="quick-pill" onclick="addQuick(15)">+15</button>
-                    <button class="quick-pill" onclick="addQuick(20)">+20</button>
-                    <button class="quick-pill" onclick="addQuick(25)">+25</button>
-                    <button class="quick-pill" onclick="addQuick(30)">+30</button>
-                    <button class="quick-pill" onclick="addQuick(35)">+35</button>
+            <div class="glass-card">
+                <div class="section-title">Быстрый ввод</div>
+                <div class="quick-actions">
+                    <button class="quick-btn" onclick="addQuick(15)">+15</button>
+                    <button class="quick-btn" onclick="addQuick(20)">+20</button>
+                    <button class="quick-btn" onclick="addQuick(25)">+25</button>
+                    <button class="quick-btn" onclick="addQuick(30)">+30</button>
+                    <button class="quick-btn" onclick="addQuick(35)">+35</button>
                 </div>
-                <div class="input-row">
-                    <input type="number" id="custom-count" class="ios-input" placeholder="Другое число..." inputmode="numeric">
-                    <button class="btn-action" onclick="submitCustom()">Записать</button>
+                <div class="input-group">
+                    <input type="number" id="custom-count" class="glass-input" placeholder="Своё число..." inputmode="numeric">
+                    <button class="btn-green" onclick="submitCustom()">Записать</button>
                 </div>
             </div>
 
-            <div class="fitness-card">
-                <div class="section-header">Подходы за сегодня</div>
+            <div class="glass-card">
+                <div class="section-title">Сегодняшние подходы</div>
                 <div id="today-sets-list"></div>
             </div>
         </div>
 
-        <!-- КАЛЕНДАРЬ (CALENDAR) -->
+        <!-- КАЛЕНДАРЬ -->
         <div id="screen-calendar" class="screen">
-            <div class="page-header">
-                <div class="page-title">Calendar</div>
-            </div>
-            <div class="fitness-card">
-                <div class="cal-header-row" id="calendar-month-title"></div>
-                <div class="cal-grid" id="calendar-grid"></div>
+            <div class="glass-card">
+                <div class="calendar-header" id="calendar-month-title">Календарь</div>
+                <div class="calendar-grid" id="calendar-grid"></div>
             </div>
         </div>
 
-        <!-- ПРОГРЕСС / АНАЛИТИКА (PROGRESS) -->
+        <!-- ПРОГРЕСС -->
         <div id="screen-progress" class="screen">
-            <div class="page-header">
-                <div class="page-title">Trends</div>
-            </div>
-            <div class="fitness-card">
+            <div class="glass-card">
+                <div class="section-title">Аналитика и графики</div>
+                
                 <div class="chart-tabs">
                     <div class="chart-tab active" id="tab-daily" onclick="setChartMode('daily')">Дни</div>
                     <div class="chart-tab" id="tab-weekly" onclick="setChartMode('weekly')">Недели</div>
                     <div class="chart-tab" id="tab-monthly" onclick="setChartMode('monthly')">Месяцы</div>
                 </div>
 
-                <div class="stats-2col">
-                    <div class="stat-card-inner">
-                        <div class="section-header" style="margin-bottom: 2px;">Серия дней</div>
-                        <div class="stat-num" id="stat-streak" style="color: var(--ring-green);">0 дней</div>
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="section-title" style="margin-bottom: 2px;">Серия дней</div>
+                        <div class="stat-value" id="stat-streak" style="color: var(--accent-green);">0 дней</div>
                     </div>
-                    <div class="stat-card-inner">
-                        <div class="section-header" style="margin-bottom: 2px;">В среднем / день</div>
-                        <div class="stat-num" id="stat-avg">0</div>
+                    <div class="stat-box">
+                        <div class="section-title" style="margin-bottom: 2px;">В среднем / день</div>
+                        <div class="stat-value" id="stat-avg">0</div>
                     </div>
                 </div>
 
-                <div class="chart-bars-box" id="chart-bars-area"></div>
+                <div class="chart-container" id="chart-bars-area"></div>
             </div>
 
-            <div class="fitness-card">
-                <div class="section-header">Сводка за всё время</div>
-                <div style="font-size: 15px; color: var(--text-secondary); line-height: 1.8;">
+            <div class="glass-card">
+                <div class="section-title">Сводка за всё время</div>
+                <div style="font-size: 14px; color: var(--text-secondary); line-height: 1.6;">
                     Всего подходов: <span id="stat-total-sets" style="color: var(--text-primary); font-weight: 700;">0</span><br>
-                    Суммарно повторений: <span id="stat-total-reps" style="color: var(--ring-green); font-weight: 700;">0</span><br>
-                    Рекорд за день: <span id="stat-max-day" style="color: var(--ring-red); font-weight: 700;">0</span>
+                    Суммарно повторений: <span id="stat-total-reps" style="color: var(--accent-green); font-weight: 700;">0</span><br>
+                    Рекорд за день: <span id="stat-max-day" style="color: var(--primary); font-weight: 700;">0</span>
                 </div>
             </div>
         </div>
 
-        <!-- НАСТРОЙКИ (SETTINGS) -->
+        <!-- НАСТРОЙКИ -->
         <div id="screen-settings" class="screen">
-            <div class="page-header">
-                <div class="page-title">Settings</div>
-            </div>
-            <div class="fitness-card">
-                <div class="section-header">Цель и уведомления</div>
-                <div class="form-item">
-                    <label class="form-label-top">Дневная цель (повторений)</label>
-                    <input type="number" id="set-daily-goal" class="form-control" value="100">
+            <div class="glass-card">
+                <div class="section-title">Цель и уведомления</div>
+                <div class="form-group">
+                    <label class="form-label">Дневная цель (повторений)</label>
+                    <input type="number" id="set-daily-goal" class="form-input" value="100">
                 </div>
-                <div class="form-item" style="display: flex; justify-content: space-between; align-items: center;">
-                    <label class="form-label-top" style="margin:0;">Уведомления</label>
-                    <div id="set-notif-toggle" class="toggle-wrap on" onclick="toggleNotif()">
-                        <div class="toggle-circle"></div>
+                <div class="form-group" style="display: flex; justify-content: space-between; align-items: center;">
+                    <label class="form-label" style="margin:0;">Уведомления</label>
+                    <div id="set-notif-toggle" class="toggle-switch on" onclick="toggleNotif()">
+                        <div class="toggle-knob"></div>
                     </div>
                 </div>
-                <div class="form-item">
-                    <label class="form-label-top">Интервал напоминаний</label>
-                    <select id="set-notif-interval" class="form-control">
+                <div class="form-group">
+                    <label class="form-label">Интервал напоминаний</label>
+                    <select id="set-notif-interval" class="form-select">
                         <option value="1">Каждый 1 час</option>
                         <option value="2">Каждые 2 часа</option>
                         <option value="3" selected>Каждые 3 часа</option>
@@ -729,62 +697,62 @@ const HTML_PAGE = `<!DOCTYPE html>
                     </select>
                 </div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-                    <div class="form-item">
-                        <label class="form-label-top">Начало</label>
-                        <input type="time" id="set-time-start" class="form-control" value="09:00">
+                    <div class="form-group">
+                        <label class="form-label">Начало</label>
+                        <input type="time" id="set-time-start" class="form-input" value="09:00">
                     </div>
-                    <div class="form-item">
-                        <label class="form-label-top">Конец</label>
-                        <input type="time" id="set-time-end" class="form-control" value="22:00">
+                    <div class="form-group">
+                        <label class="form-label">Конец</label>
+                        <input type="time" id="set-time-end" class="form-input" value="22:00">
                     </div>
                 </div>
-                <button class="btn-action" onclick="saveSettingsData()" style="width: 100%; padding: 14px; margin-top: 10px; background: var(--ring-green); color: #000;">Сохранить настройки</button>
+                <button class="btn-green" onclick="saveSettingsData()" style="width: 100%; margin-top: 10px;">Сохранить настройки</button>
             </div>
 
-            <div class="fitness-card">
-                <div class="section-header">Антропометрия</div>
+            <div class="glass-card">
+                <div class="section-title">Антропометрия</div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-                    <div class="form-item">
-                        <label class="form-label-top">Вес (кг)</label>
-                        <input type="number" id="prof-weight" class="form-control" step="0.1">
+                    <div class="form-group">
+                        <label class="form-label">Вес (кг)</label>
+                        <input type="number" id="prof-weight" class="form-input" step="0.1">
                     </div>
-                    <div class="form-item">
-                        <label class="form-label-top">Рост (см)</label>
-                        <input type="number" id="prof-height" class="form-control">
+                    <div class="form-group">
+                        <label class="form-label">Рост (см)</label>
+                        <input type="number" id="prof-height" class="form-input">
                     </div>
-                    <div class="form-item">
-                        <label class="form-label-top">% Жира</label>
-                        <input type="number" id="prof-fat" class="form-control" step="0.1">
+                    <div class="form-group">
+                        <label class="form-label">% Жира</label>
+                        <input type="number" id="prof-fat" class="form-input" step="0.1">
                     </div>
-                    <div class="form-item">
-                        <label class="form-label-top">Цель (кг)</label>
-                        <input type="number" id="prof-target-weight" class="form-control" step="0.1">
+                    <div class="form-group">
+                        <label class="form-label">Цель (кг)</label>
+                        <input type="number" id="prof-target-weight" class="form-input" step="0.1">
                     </div>
                 </div>
-                <button class="btn-action" onclick="saveProfileData()" style="width: 100%; padding: 14px; margin-top: 10px; background: var(--ring-blue); color: white;">Сохранить профиль</button>
+                <button class="btn-green" onclick="saveProfileData()" style="width: 100%; margin-top: 10px; background: var(--primary); color: white;">Сохранить профиль</button>
             </div>
         </div>
 
     </div>
 
-    <!-- Apple Fitness Bottom Navigation Bar -->
-    <div class="apple-nav">
-        <button class="nav-btn active" onclick="switchTab('summary', event)">
-            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H7c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.04-.42 1.99-1.07 2.75z"/></svg>
-            <span>Summary</span>
-        </button>
-        <button class="nav-btn" onclick="switchTab('calendar', event)">
-            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11z"/></svg>
-            <span>Calendar</span>
-        </button>
-        <button class="nav-btn" onclick="switchTab('progress', event)">
-            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
-            <span>Trends</span>
-        </button>
-        <button class="nav-btn" onclick="switchTab('settings', event)">
-            <svg class="nav-icon" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
-            <span>Settings</span>
-        </button>
+    <!-- Нижняя навигация -->
+    <div class="bottom-nav">
+        <div class="nav-item active" onclick="switchTab('main', event)">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+            <span>Главная</span>
+        </div>
+        <div class="nav-item" onclick="switchTab('calendar', event)">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11z"/></svg>
+            <span>Календарь</span>
+        </div>
+        <div class="nav-item" onclick="switchTab('progress', event)">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
+            <span>Прогресс</span>
+        </div>
+        <div class="nav-item" onclick="switchTab('settings', event)">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+            <span>Настройки</span>
+        </div>
     </div>
 </div>
 
@@ -804,9 +772,6 @@ const HTML_PAGE = `<!DOCTYPE html>
         chartMode: 'daily'
     };
 
-    const optionsDate = { weekday: 'long', month: 'short', day: 'numeric' };
-    document.getElementById('current-date-header').innerText = new Date().toLocaleDateString('en-US', optionsDate);
-
     function triggerHaptic() {
         if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
     }
@@ -814,7 +779,7 @@ const HTML_PAGE = `<!DOCTYPE html>
     function switchTab(tab, event) {
         triggerHaptic();
         document.querySelectorAll('.screen').forEach(function(el) { el.classList.remove('active'); });
-        document.querySelectorAll('.nav-btn').forEach(function(el) { el.classList.remove('active'); });
+        document.querySelectorAll('.nav-item').forEach(function(el) { el.classList.remove('active'); });
         document.getElementById('screen-' + tab).classList.add('active');
         if (event && event.currentTarget) {
             event.currentTarget.classList.add('active');
@@ -842,6 +807,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                     state.timeEnd = data.settings.time_end || "22:00";
 
                     document.getElementById('set-daily-goal').value = state.dailyGoal;
+                    document.getElementById('goal-display').innerText = state.dailyGoal;
                     document.getElementById('set-notif-interval').value = state.notificationInterval;
                     document.getElementById('set-time-start').value = state.timeStart;
                     document.getElementById('set-time-end').value = state.timeEnd;
@@ -872,29 +838,30 @@ const HTML_PAGE = `<!DOCTYPE html>
         });
         const total = todaySets.reduce(function(a, b) { return a + b.count; }, 0);
 
-        document.getElementById('today-total-ui').innerText = total + ' / ' + state.dailyGoal;
+        document.getElementById('today-total-uiinnerHTMLHtml' || 'today-total-ui').innerHTML = total + ' <span style="font-size: 14px; color: var(--text-secondary); font-weight: 500;">/ ' + state.dailyGoal + '</span>';
         document.getElementById('today-sets-count-ui').innerText = todaySets.length;
 
-        const movePct = Math.min(100, Math.round((total / state.dailyGoal) * 100)) || 0;
-        const moveOffset = 264 - (movePct / 100) * 264;
-        document.getElementById('ring-move').style.strokeDashoffset = moveOffset;
-
-        const setsPct = Math.min(100, Math.round((todaySets.length / 10) * 100)) || 0;
-        const setsOffset = 201 - (setsPct / 100) * 201;
-        document.getElementById('ring-exercise').style.strokeDashoffset = setsOffset;
+        const pct = Math.min(100, Math.round((total / state.dailyGoal) * 100)) || 0;
+        document.getElementById('ring-pct').innerText = pct + '%';
+        document.getElementById('ring-pct').style.color = pct >= 100 ? 'var(--accent-green)' : 'var(--text-primary)';
+        
+        const circle = document.getElementById('ring-progress');
+        const offset = 226 - (pct / 100) * 226;
+        circle.style.strokeDashoffset = offset;
+        circle.style.stroke = pct >= 100 ? 'var(--accent-green)' : 'var(--primary)';
 
         const listEl = document.getElementById('today-sets-list');
         listEl.innerHTML = '';
         if (todaySets.length === 0) {
-            listEl.innerHTML = '<div style="text-align: center; color: var(--text-secondary); font-size: 14px; padding: 10px;">Нет подходов за сегодня</div>';
+            listEl.innerHTML = '<div style="text-align: center; color: var(--text-secondary); font-size: 14px; padding: 10px;">Нет данных за сегодня</div>';
         } else {
             todaySets.forEach(function(item) {
                 const timeStr = new Date(item.created_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-                listEl.innerHTML += '<div class="exercise-row">' +
-                    '<span style="color: var(--ring-green); font-size: 16px; font-weight: 800;">+' + item.count + '</span>' +
-                    '<div style="display: flex; gap: 14px; align-items: center;">' +
+                listEl.innerHTML += '<div class="exercise-item">' +
+                    '<span style="color: var(--accent-green); font-size: 16px; font-weight: 800;">+' + item.count + '</span>' +
+                    '<div style="display: flex; gap: 12px; align-items: center;">' +
                         '<span style="color: var(--text-secondary); font-size: 14px;">' + timeStr + '</span>' +
-                        '<button style="background: none; border: none; color: var(--text-secondary); padding: 4px; font-size: 16px; cursor: pointer;" onclick="deleteSet(\'' + item.id + '\')">✕</button>' +
+                        '<button style="background: none; border: none; color: #555; padding: 4px; font-size: 16px;" onclick="deleteSet(' + item.id + ')">✕</button>' +
                     '</div>' +
                 '</div>';
             });
@@ -946,7 +913,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     async function deleteSet(id) {
         triggerHaptic();
-        state.pushupsHistory = state.pushupsHistory.filter(function(i) { return String(i.id) !== String(id); });
+        state.pushupsHistory = state.pushupsHistory.filter(function(i) { return i.id !== id; });
         updateProgressUI();
 
         try {
@@ -975,6 +942,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         state.notificationInterval = interval;
         state.timeStart = timeStart;
         state.timeEnd = timeEnd;
+        document.getElementById('goal-display').innerText = goal;
         
         await fetch('/api/save-settings', {
             method: 'POST',
@@ -1083,7 +1051,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                     const dateStr = d.toISOString().split('T')[0];
                     weekSum += (dailyMap[dateStr] || 0);
                 }
-                chartData.push({ label: (4 - i) + '-я', value: weekSum });
+                chartData.push({ label: (4 - i) + '-я нед.', value: weekSum });
             }
         } else if (state.chartMode === 'monthly') {
             for (let i = 4; i >= 0; i--) {
@@ -1106,14 +1074,14 @@ const HTML_PAGE = `<!DOCTYPE html>
             const heightPct = Math.min(100, Math.round((item.value / maxVal) * 100));
             const isCompleted = item.value >= (state.chartMode === 'daily' ? state.dailyGoal : state.dailyGoal * (state.chartMode === 'weekly' ? 7 : 30));
             
-            let barClass = 'bar-column';
+            let barClass = 'chart-bar';
             if (isCompleted) barClass += ' filled';
-            else if (item.value > 0) barClass += ' active-bar';
+            else if (item.value > 0) barClass += ' active-day';
 
-            chartArea.innerHTML += '<div class="bar-wrapper">' +
+            chartArea.innerHTML += '<div class="chart-bar-wrap">' +
                 '<div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">' + (item.value > 0 ? item.value : '') + '</div>' +
                 '<div class="' + barClass + '" style="height: ' + Math.max(8, heightPct) + '%;"></div>' +
-                '<div class="bar-lbl">' + item.label + '</div>' +
+                '<div class="chart-label">' + item.label + '</div>' +
             '</div>';
         });
     }
@@ -1140,14 +1108,14 @@ const HTML_PAGE = `<!DOCTYPE html>
         gridEl.innerHTML = '';
         const weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
         weekdays.forEach(function(wd) {
-            gridEl.innerHTML += '<div class="cal-wd">' + wd + '</div>';
+            gridEl.innerHTML += '<div class="calendar-weekday">' + wd + '</div>';
         });
 
         const firstDayIndex = (new Date(year, month, 1).getDay() + 6) % 7;
         const totalDays = new Date(year, month + 1, 0).getDate();
 
         for (let i = 0; i < firstDayIndex; i++) {
-            gridEl.innerHTML += '<div class="cal-day empty"></div>';
+            gridEl.innerHTML += '<div class="calendar-day empty"></div>';
         }
 
         const todayStr = now.toISOString().split('T')[0];
@@ -1158,7 +1126,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             const hasActivity = completedDays[dayStr] > 0;
             const isToday = (dayStr === todayStr);
 
-            let classes = 'cal-day';
+            let classes = 'calendar-day';
             if (isCompleted || hasActivity) classes += ' completed';
             if (isToday) classes += ' today';
 
