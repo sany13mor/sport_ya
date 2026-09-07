@@ -1,14 +1,16 @@
 {
-  "name": "sport-ya-bot",
-  "version": "2.1.0",
-  "description": "Full Hybrid Telegram Fitness WebApp",
+  "name": "telegram-sport-app",
+  "version": "1.0.0",
+  "description": "Telegram Mini App with SQLite",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "node-telegram-bot-api": "^0.66.0",
-    "pg": "^8.11.5"
+    "sqlite3": "^5.1.7"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
