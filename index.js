@@ -17,7 +17,7 @@ const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUP
 
 app.use(express.json());
 
-// --- TELEGRAM BOT HELPER (С поддержки Inline-кнопок) ---
+// --- HELPER ДЛЯ ОТПРАВКИ СООБЩЕНИЙ В TELEGRAM ---
 function sendTelegramMessage(chatId, text, replyMarkup = null) {
     if (!BOT_TOKEN) return;
     const payload = { chat_id: chatId, text: text, parse_mode: 'HTML' };
@@ -35,7 +35,7 @@ function sendTelegramMessage(chatId, text, replyMarkup = null) {
     req.end();
 }
 
-// --- СЛУЖБА НАПОМИНАНИЙ С УЧЕТОМ ДИАПАЗОНА ВРЕМЕНИ ---
+// --- ПРОВЕРКА НАПОМИНАНИЙ ПО ДИАПАЗОНУ ВРЕМЕНИ ---
 setInterval(async () => {
     if (!supabase) return;
     const now = new Date();
@@ -61,12 +61,13 @@ setInterval(async () => {
                         [
                             { text: '⏳ 15 мин', callback_data: 'snooze_15' },
                             { text: '⏳ 30 мин', callback_data: 'snooze_30' },
+                            { text: '⏳ 45 мин', callback_data: 'snooze_45' },
                             { text: '⏳ 1 час', callback_data: 'snooze_60' }
                         ]
                     ]
                 };
 
-                const msg = `🔥 <b>iOS Fitness Reminder</b>\nПора сделать подход! Дневная цель: <b>${user.daily_goal || 100}</b>.`;
+                const msg = '🔥 <b>Fitness Reminder</b>\nПора сделать подход! Дневная цель: <b>' + (user.daily_goal || 100) + '</b>.';
                 sendTelegramMessage(user.user_id, msg, keyboard);
             }
         });
@@ -75,7 +76,7 @@ setInterval(async () => {
     }
 }, 60000);
 
-// --- WEBHOOK ДЛЯ ОБРАБОТКИ ИНТЕРАКТИВНЫХ КНОПОК TELEGRAM ---
+// --- WEBHOOK ДЛЯ КНОПОК БОТА (ФИКСАЦИЯ И ПЕРЕНОС) ---
 app.post('/api/telegram-webhook', async (req, res) => {
     const { callback_query } = req.body;
     if (callback_query && supabase) {
@@ -85,10 +86,30 @@ app.post('/api/telegram-webhook', async (req, res) => {
         if (action.startsWith('add_')) {
             const count = parseInt(action.replace('add_', ''));
             await supabase.from('pushups').insert([{ user_id: String(chatId), count: count, exercise_type: 'pushups' }]);
-            sendTelegramMessage(chatId, `✅ Добавлено <b>+${count}</b> подтягиваний/отжиманий в статистику!`);
+            sendTelegramMessage(chatId, '✅ Зафиксировано <b>+' + count + '</b> повторений в статистику!');
         } else if (action.startsWith('snooze_')) {
-            const mins = action.replace('snooze_', '');
-            sendTelegramMessage(chatId, `⏳ Напоминание отложено на <b>${mins} минут</b>.`);
+            const mins = parseInt(action.replace('snooze_', ''));
+            sendTelegramMessage(chatId, '⏳ Напоминание отложено на <b>' + mins + ' минут</b>.');
+            
+            // Запланировать отложенное напоминание
+            setTimeout(() => {
+                const keyboard = {
+                    inline_keyboard: [
+                        [
+                            { text: '+10 🏋️', callback_data: 'add_10' },
+                            { text: '+20 🏋️', callback_data: 'add_20' },
+                            { text: '+30 🏋️', callback_data: 'add_30' }
+                        ],
+                        [
+                            { text: '⏳ 15 мин', callback_data: 'snooze_15' },
+                            { text: '⏳ 30 мин', callback_data: 'snooze_30' },
+                            { text: '⏳ 45 мин', callback_data: 'snooze_45' },
+                            { text: '⏳ 1 час', callback_data: 'snooze_60' }
+                        ]
+                    ]
+                };
+                sendTelegramMessage(chatId, '⏰ <b>Отложенное напоминание!</b>\nПора сделать подход!', keyboard);
+            }, mins * 60 * 1000);
         }
     }
     res.sendStatus(200);
@@ -116,19 +137,6 @@ app.get('/api/stats', async (req, res) => {
     res.json({ activeDates, rawData: data || [] });
 });
 
-app.get('/api/history', async (req, res) => {
-    if (!supabase) return res.json({ history: [] });
-    const userId = String(req.query.user_id || 'guest');
-    const { data } = await supabase.from('pushups').select('*').eq('user_id', userId).order('created_at', { ascending: false });
-    res.json({ history: data || [] });
-});
-
-app.delete('/api/delete/:id', async (req, res) => {
-    if (!supabase) return res.status(500).json({ error: 'DB Error' });
-    await supabase.from('pushups').delete().eq('id', req.params.id);
-    res.json({ success: true });
-});
-
 app.get('/api/profile', async (req, res) => {
     if (!supabase) return res.json({});
     const userId = String(req.query.user_id || 'guest');
@@ -141,8 +149,7 @@ app.get('/api/profile', async (req, res) => {
         weight: 75,
         height: 180,
         target_weight: 70,
-        body_fat: 15,
-        level: 'Продвинутый'
+        body_fat: 15
     });
 });
 
@@ -154,7 +161,7 @@ app.post('/api/profile', async (req, res) => {
     res.json({ success: true });
 });
 
-// --- ФРОНТЕНД С ИНТЕРФЕЙСОМ iOS 19 GLASS ---
+// --- FRONTEND (iOS 19 GLASS UI) ---
 app.get('*', (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -167,23 +174,32 @@ app.get('*', (req, res) => {
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
-            --glass-bg: rgba(255, 255, 255, 0.07);
-            --glass-border: rgba(255, 255, 255, 0.15);
-            --glass-card: rgba(30, 41, 59, 0.45);
+            --glass-bg: rgba(255, 255, 255, 0.08);
+            --glass-border: rgba(255, 255, 255, 0.18);
+            --glass-card: rgba(30, 41, 59, 0.55);
             --accent-blue: #38bdf8;
             --accent-green: #22c55e;
             --accent-purple: #a855f7;
         }
 
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+        }
         
         body {
             background: radial-gradient(circle at 50% -20%, #1e1b4b 0%, #0f172a 50%, #020617 100%);
             background-attachment: fixed;
             color: #f8fafc;
             min-height: 100vh;
-            padding-top: env(safe-area-inset-top);
+            padding-top: calc(10px + env(safe-area-inset-top));
             padding-bottom: calc(90px + env(safe-area-inset-bottom));
+            overflow-x: hidden;
+            -webkit-font-smoothing: antialiased;
         }
 
         /* Glass Header */
@@ -217,6 +233,7 @@ app.get('*', (req, res) => {
             padding: 20px;
             margin-bottom: 16px;
             box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            will-change: transform;
         }
 
         .card-label { font-size: 12px; text-transform: uppercase; color: #94a3b8; font-weight: 700; letter-spacing: 0.08em; margin-bottom: 12px; }
@@ -234,9 +251,9 @@ app.get('*', (req, res) => {
             font-size: 17px;
             font-weight: 700;
             cursor: pointer;
-            transition: all 0.15s ease;
+            transition: transform 0.1s ease, background 0.15s ease;
         }
-        .btn-glass:active { transform: scale(0.95); background: rgba(255, 255, 255, 0.18); }
+        .btn-glass:active { transform: scale(0.94); background: rgba(255, 255, 255, 0.18); }
 
         .btn-action {
             width: 100%;
@@ -249,6 +266,7 @@ app.get('*', (req, res) => {
             font-weight: 800;
             box-shadow: 0 10px 25px rgba(34, 197, 94, 0.35);
             cursor: pointer;
+            transition: transform 0.1s ease;
         }
         .btn-action:active { transform: scale(0.97); }
 
@@ -276,7 +294,7 @@ app.get('*', (req, res) => {
         .navbar {
             position: fixed;
             bottom: 0; left: 0; right: 0;
-            background: rgba(15, 23, 42, 0.75);
+            background: rgba(15, 23, 42, 0.78);
             backdrop-filter: blur(30px) saturate(200%);
             -webkit-backdrop-filter: blur(30px) saturate(200%);
             border-top: 1px solid var(--glass-border);
@@ -409,21 +427,21 @@ app.get('*', (req, res) => {
     </div>
 
     <script>
-        const tg = window.Telegram?.WebApp;
+        var tg = window.Telegram ? window.Telegram.WebApp : null;
         if (tg) { tg.expand(); tg.ready(); }
 
-        const userId = tg?.initDataUnsafe?.user?.id || 'demo_user';
-        if (tg?.initDataUnsafe?.user?.first_name) {
+        var userId = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) ? tg.initDataUnsafe.user.id : 'demo_user';
+        if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.first_name) {
             document.getElementById('username').innerText = tg.initDataUnsafe.user.first_name;
         }
 
-        let currentCount = 0;
-        let chartInstance = null;
+        var currentCount = 0;
+        var chartInstance = null;
 
         function addValue(v) {
             currentCount += v;
             document.getElementById('counter').innerText = currentCount;
-            if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+            if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
         }
 
         function resetCounter() {
@@ -432,8 +450,11 @@ app.get('*', (req, res) => {
         }
 
         function switchTab(tabId, btn) {
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+            var tabs = document.querySelectorAll('.tab-content');
+            for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
+            var btns = document.querySelectorAll('.nav-btn');
+            for (var j = 0; j < btns.length; j++) btns[j].classList.remove('active');
+            
             document.getElementById('tab-' + tabId).classList.add('active');
             btn.classList.add('active');
 
@@ -449,22 +470,21 @@ app.get('*', (req, res) => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user_id: userId, count: currentCount, exercise_type: 'pushups' })
             });
-            if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+            if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
             resetCounter();
             alert('Подход успешно зафиксирован!');
         }
 
         async function loadProfile() {
-            const res = await fetch('/api/profile?user_id=' + userId);
-            const p = await res.json();
+            var res = await fetch('/api/profile?user_id=' + userId);
+            var p = await res.json();
             
             document.getElementById('profWeight').innerText = (p.weight || 75) + ' кг';
             document.getElementById('profHeight').innerText = (p.height || 180) + ' см';
             document.getElementById('profFat').innerText = (p.body_fat || 15) + '%';
             
-            // ИМТ калькулятор
-            const hM = (p.height || 180) / 100;
-            const bmi = ((p.weight || 75) / (hM * hM)).toFixed(1);
+            var hM = (p.height || 180) / 100;
+            var bmi = ((p.weight || 75) / (hM * hM)).toFixed(1);
             document.getElementById('profBmi').innerText = bmi;
 
             document.getElementById('editWeight').value = p.weight || 75;
@@ -474,62 +494,67 @@ app.get('*', (req, res) => {
         }
 
         async function saveProfile() {
-            const weight = parseFloat(document.getElementById('editWeight').value);
-            const height = parseFloat(document.getElementById('editHeight').value);
-            const target_weight = parseFloat(document.getElementById('editTargetWeight').value);
-            const body_fat = parseFloat(document.getElementById('editFat').value);
+            var weight = parseFloat(document.getElementById('editWeight').value);
+            var height = parseFloat(document.getElementById('editHeight').value);
+            var target_weight = parseFloat(document.getElementById('editTargetWeight').value);
+            var body_fat = parseFloat(document.getElementById('editFat').value);
 
             await fetch('/api/profile', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, weight, height, target_weight, body_fat })
+                body: JSON.stringify({ user_id: userId, weight: weight, height: height, target_weight: target_weight, body_fat: body_fat })
             });
             alert('Карточка атлета обновлена!');
             loadProfile();
         }
 
         async function loadAnalytics() {
-            const res = await fetch('/api/stats?user_id=' + userId);
-            const data = await res.json();
+            var res = await fetch('/api/stats?user_id=' + userId);
+            var data = await res.json();
             renderCalendar(data.activeDates || []);
             renderChart(data.rawData || []);
         }
 
         function renderCalendar(activeDates) {
-            const calGrid = document.getElementById('calendarGrid');
-            const now = new Date();
-            const year = now.getFullYear();
-            const month = now.getMonth();
-            const daysInMonth = new Date(year, month + 1, 0).getDate();
+            var calGrid = document.getElementById('calendarGrid');
+            var now = new Date();
+            var year = now.getFullYear();
+            var month = now.getMonth();
+            var daysInMonth = new Date(year, month + 1, 0).getDate();
 
-            const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-            let html = dayNames.map(d => `<div class="cal-day-name">${d}</div>`).join('');
+            var dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+            var html = '';
+            for (var i = 0; i < dayNames.length; i++) {
+                html += '<div class="cal-day-name">' + dayNames[i] + '</div>';
+            }
 
-            for (let day = 1; day <= daysInMonth; day++) {
-                const mStr = String(month + 1).padStart(2, '0');
-                const dStr = String(day).padStart(2, '0');
-                const dateStr = `${year}-${mStr}-${dStr}`;
-                const isActive = activeDates.includes(dateStr) ? 'active' : '';
-                html += `<div class="cal-day ${isActive}">${day}</div>`;
+            for (var day = 1; day <= daysInMonth; day++) {
+                var mStr = String(month + 1).padStart(2, '0');
+                var dStr = String(day).padStart(2, '0');
+                var dateStr = year + '-' + mStr + '-' + dStr;
+                var isActive = activeDates.indexOf(dateStr) !== -1 ? 'active' : '';
+                html += '<div class="cal-day ' + isActive + '">' + day + '</div>';
             }
             calGrid.innerHTML = html;
         }
 
         function renderChart(rawData) {
-            const ctx = document.getElementById('progressChart').getContext('2d');
-            const labels = [];
-            const values = [];
+            var ctx = document.getElementById('progressChart').getContext('2d');
+            var labels = [];
+            var values = [];
 
-            for (let i = 6; i >= 0; i--) {
-                const d = new Date();
+            for (var i = 6; i >= 0; i--) {
+                var d = new Date();
                 d.setDate(d.getDate() - i);
-                const dateStr = d.toISOString().split('T')[0];
+                var dateStr = d.toISOString().split('T')[0];
                 labels.push(d.toLocaleDateString('ru', { weekday: 'short' }));
                 
-                const sum = rawData
-                    .filter(item => item.created_at.startsWith(dateStr))
-                    .reduce((acc, curr) => acc + curr.count, 0);
-
+                var sum = 0;
+                for (var j = 0; j < rawData.length; j++) {
+                    if (rawData[j].created_at && rawData[j].created_at.startsWith(dateStr)) {
+                        sum += rawData[j].count;
+                    }
+                }
                 values.push(sum);
             }
 
@@ -550,8 +575,8 @@ app.get('*', (req, res) => {
         }
 
         async function loadSettings() {
-            const res = await fetch('/api/profile?user_id=' + userId);
-            const settings = await res.json();
+            var res = await fetch('/api/profile?user_id=' + userId);
+            var settings = await res.json();
             document.getElementById('settingGoal').value = settings.daily_goal || 100;
             document.getElementById('settingStart').value = settings.reminder_start || '09:00';
             document.getElementById('settingEnd').value = settings.reminder_end || '21:00';
@@ -559,9 +584,9 @@ app.get('*', (req, res) => {
         }
 
         async function saveSettings() {
-            const goal = parseInt(document.getElementById('settingGoal').value);
-            const start = document.getElementById('settingStart').value;
-            const end = document.getElementById('settingEnd').value;
+            var goal = parseInt(document.getElementById('settingGoal').value);
+            var start = document.getElementById('settingStart').value;
+            var end = document.getElementById('settingEnd').value;
 
             await fetch('/api/profile', {
                 method: 'POST',
@@ -575,7 +600,7 @@ app.get('*', (req, res) => {
             });
 
             document.getElementById('headerGoal').innerText = goal;
-            alert('Настройки диапазонов сохранены!');
+            alert('Настройки сохранены!');
         }
 
         loadSettings();
