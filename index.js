@@ -1,21 +1,38 @@
 try { require('dotenv').config(); } catch (e) {}
-const http = require('http');
+const express = require('express');
+const path = require('path');
 const { Pool } = require('pg');
 const TelegramBot = require('node-telegram-bot-api');
 
-// Простой веб-сервер для удержания порта на Render
+const app = express();
 const PORT = process.env.PORT || 10000;
-http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Bot is running!');
-}).listen(PORT, () => {
-    console.log(`🚀 Сервер запущен и слушает порт ${PORT}`);
+
+// Сервер статики для Telegram Mini App
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(__dirname));
+
+// Отдача интерфейса WebApp
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'), (err) => {
+        if (err) {
+            res.sendFile(path.join(__dirname, 'index.html'), (err2) => {
+                if (err2) {
+                    res.send('Bot & WebApp server is active!');
+                }
+            });
+        }
+    });
+});
+
+app.listen(PORT, () => {
+    console.log(`🚀 Сервер запущен на порту ${PORT}`);
 });
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
 if (!token) {
-    console.error('❌ ОШИБКА: Переменная TELEGRAM_BOT_TOKEN не задана в Environment на Render!');
+    console.error('❌ ОШИБКА: Переменная TELEGRAM_BOT_TOKEN не задана!');
 } else {
     const bot = new TelegramBot(token, { polling: true });
 
