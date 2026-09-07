@@ -46,7 +46,7 @@ app.get('/api/user-data', async (req, res) => {
             status: 'ok',
             settings: inMemoryStore.settings[userIdStr] || null,
             profile: inMemoryStore.profiles[userIdStr] || null,
-            pushups: inMemoryStore.pushups.filter(p => p.user_id === userIdInt).slice(0, 300)
+            pushups: inMemoryStore.pushups.filter(p => p.user_id === userIdInt).slice(0, 500)
         });
     }
 
@@ -75,7 +75,7 @@ app.get('/api/user-data', async (req, res) => {
             status: 'ok',
             settings: settingsData || inMemoryStore.settings[userIdStr] || null,
             profile: profileData || inMemoryStore.profiles[userIdStr] || null,
-            pushups: (pushups || []).slice(0, 300)
+            pushups: (pushups || []).slice(0, 500)
         });
     } catch (e) {
         console.error('❌ API Error:', e);
@@ -446,6 +446,85 @@ const HTML_PAGE = `<!DOCTYPE html>
             border: 1px solid var(--primary);
         }
 
+        /* Chart & Stats Styles */
+        .chart-tabs {
+            display: flex;
+            background: var(--glass-lighter);
+            border-radius: 10px;
+            padding: 3px;
+            margin-bottom: 16px;
+        }
+        .chart-tab {
+            flex: 1;
+            text-align: center;
+            padding: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .chart-tab.active {
+            background: var(--glass-light);
+            color: var(--text-primary);
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .stat-box {
+            background: var(--glass-lighter);
+            border-radius: 14px;
+            padding: 12px;
+        }
+        .stat-value {
+            font-size: 20px;
+            font-weight: 800;
+            margin-top: 4px;
+            color: var(--text-primary);
+        }
+        .chart-container {
+            width: 100%;
+            height: 180px;
+            display: flex;
+            align-items: flex-end;
+            gap: 6px;
+            padding-top: 20px;
+            position: relative;
+        }
+        .chart-bar-wrap {
+            flex: 1;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-end;
+            position: relative;
+        }
+        .chart-bar {
+            width: 100%;
+            max-width: 24px;
+            background: var(--glass-lighter);
+            border-radius: 6px 6px 0 0;
+            transition: height 0.4s ease;
+            position: relative;
+        }
+        .chart-bar.filled {
+            background: linear-gradient(180deg, var(--accent-green), #248a3d);
+        }
+        .chart-bar.active-day {
+            background: linear-gradient(180deg, var(--primary), var(--primary-light));
+        }
+        .chart-label {
+            font-size: 10px;
+            color: var(--text-secondary);
+            margin-top: 6px;
+            text-align: center;
+        }
+
         .bottom-nav {
             position: fixed;
             bottom: 0;
@@ -561,10 +640,36 @@ const HTML_PAGE = `<!DOCTYPE html>
         <!-- ПРОГРЕСС -->
         <div id="screen-progress" class="screen">
             <div class="glass-card">
-                <div class="section-title">Общая статистика</div>
-                <div style="font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
-                    Всего записей в истории: <span id="stat-total-sets" style="color: var(--text-primary); font-weight: 700;">0</span><br>
-                    Суммарно повторений: <span id="stat-total-reps" style="color: var(--accent-green); font-weight: 700;">0</span>
+                <div class="section-title">Аналитика и графики</div>
+                
+                <div class="chart-tabs">
+                    <div class="chart-tab active" id="tab-daily" onclick="setChartMode('daily')">Дни</div>
+                    <div class="chart-tab" id="tab-weekly" onclick="setChartMode('weekly')">Недели</div>
+                    <div class="chart-tab" id="tab-monthly" onclick="setChartMode('monthly')">Месяцы</div>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="section-title" style="margin-bottom: 2px;">Серия дней</div>
+                        <div class="stat-value" id="stat-streak" style="color: var(--accent-green);">0 дней</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="section-title" style="margin-bottom: 2px;">В среднем / день</div>
+                        <div class="stat-value" id="stat-avg">0</div>
+                    </div>
+                </div>
+
+                <div class="chart-container" id="chart-bars-area">
+                    <!-- График рендерится через JS -->
+                </div>
+            </div>
+
+            <div class="glass-card">
+                <div class="section-title">Сводка за всё время</div>
+                <div style="font-size: 14px; color: var(--text-secondary); line-height: 1.6;">
+                    Всего подходов: <span id="stat-total-sets" style="color: var(--text-primary); font-weight: 700;">0</span><br>
+                    Суммарно повторений: <span id="stat-total-reps" style="color: var(--accent-green); font-weight: 700;">0</span><br>
+                    Рекорд за день: <span id="stat-max-day" style="color: var(--primary); font-weight: 700;">0</span>
                 </div>
             </div>
         </div>
@@ -665,7 +770,8 @@ const HTML_PAGE = `<!DOCTYPE html>
         notificationInterval: 3,
         timeStart: "09:00",
         timeEnd: "22:00",
-        pushupsHistory: []
+        pushupsHistory: [],
+        chartMode: 'daily'
     };
 
     function triggerHaptic() {
@@ -682,6 +788,8 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
         if (tab === 'calendar') {
             renderCalendar();
+        } else if (tab === 'progress') {
+            renderChartsAndStats();
         }
     }
 
@@ -749,27 +857,22 @@ const HTML_PAGE = `<!DOCTYPE html>
         } else {
             todaySets.forEach(item => {
                 const timeStr = new Date(item.created_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-                listEl.innerHTML += \`
+                listEl.innerHTML += `
                     <div class="exercise-item">
-                        <span style="color: var(--accent-green); font-size: 16px; font-weight: 800;">+\${item.count}</span>
+                        <span style="color: var(--accent-green); font-size: 16px; font-weight: 800;">+${item.count}</span>
                         <div style="display: flex; gap: 12px; align-items: center;">
-                            <span style="color: var(--text-secondary); font-size: 14px;">\${timeStr}</span>
-                            <button style="background: none; border: none; color: #555; padding: 4px; font-size: 16px;" onclick="deleteSet(\${item.id})">✕</button>
+                            <span style="color: var(--text-secondary); font-size: 14px;">${timeStr}</span>
+                            <button style="background: none; border: none; color: #555; padding: 4px; font-size: 16px;" onclick="deleteSet(${item.id})">✕</button>
                         </div>
-                    </div>\`;
+                    </div>`;
             });
         }
-
-        // Обновляем статистику
-        document.getElementById('stat-total-sets').innerText = state.pushupsHistory.length;
-        document.getElementById('stat-total-reps').innerText = state.pushupsHistory.reduce((a, b) => a + b.count, 0);
     }
 
     // Оптимизированный мгновенный ввод (Optimistic UI)
     async function addQuick(count) {
         triggerHaptic();
         
-        // Создаем временный элемент для мгновенного отклика (0мс пинг)
         const tempId = 'temp_' + Date.now();
         const tempItem = {
             id: tempId,
@@ -875,6 +978,127 @@ const HTML_PAGE = `<!DOCTYPE html>
         if(tg) tg.showAlert("Профиль обновлен!");
     }
 
+    function setChartMode(mode) {
+        triggerHaptic();
+        state.chartMode = mode;
+        document.querySelectorAll('.chart-tab').forEach(el => el.classList.remove('active'));
+        document.getElementById('tab-' + mode).classList.add('active');
+        renderChartsAndStats();
+    }
+
+    function renderChartsAndStats() {
+        // 1. Агрегация по днях для расчетов
+        const dailyMap = {};
+        state.pushupsHistory.forEach(item => {
+            if (item.created_at) {
+                const dayStr = item.created_at.split('T')[0];
+                dailyMap[dayStr] = (dailyMap[dayStr] || 0) + item.count;
+            }
+        });
+
+        const allDays = Object.keys(dailyMap).sort();
+        const totalReps = state.pushupsHistory.reduce((a, b) => a + b.count, 0);
+        document.getElementById('stat-total-sets').innerText = state.pushupsHistory.length;
+        document.getElementById('stat-total-reps').innerText = totalReps;
+
+        let maxDay = 0;
+        Object.values(dailyMap).forEach(val => { if (val > maxDay) maxDay = val; });
+        document.getElementById('stat-max-day').innerText = maxDay;
+
+        // Расчет стрика (серии дней подряд с выполненной целью)
+        let streak = 0;
+        let checkDate = new Date();
+        while (true) {
+            const dateStr = checkDate.toISOString().split('T')[0];
+            const sum = dailyMap[dateStr] || 0;
+            if (sum >= state.dailyGoal) {
+                streak++;
+                checkDate.setDate(checkDate.getDate() - 1);
+            } else {
+                // Если сегодня еще не выполнено, проверим вчерашний день, вдруг стрик вчерашний
+                if (streak === 0 && dateStr === new Date().toISOString().split('T')[0]) {
+                    checkDate.setDate(checkDate.getDate() - 1);
+                    const yesterStr = checkDate.toISOString().split('T')[0];
+                    if ((dailyMap[yesterStr] || 0) >= state.dailyGoal) {
+                        streak++;
+                        checkDate.setDate(checkDate.getDate() - 1);
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+        document.getElementById('stat-streak').innerText = streak + ' дней';
+
+        // Среднее за активные дни
+        const activeDaysCount = Object.keys(dailyMap).length;
+        const avg = activeDaysCount > 0 ? Math.round(totalReps / activeDaysCount) : 0;
+        document.getElementById('stat-avg').innerText = avg;
+
+        // 2. Рендеринг красивого графика
+        const chartArea = document.getElementById('chart-bars-area');
+        chartArea.innerHTML = '';
+
+        let chartData = [];
+        const now = new Date();
+
+        if (state.chartMode === 'daily') {
+            // Последние 7 дней
+            for (let i = 6; i >= 0; i--) {
+                const d = new Date(now);
+                d.setDate(d.getDate() - i);
+                const dateStr = d.toISOString().split('T')[0];
+                const label = d.toLocaleDateString('ru-RU', { weekday: 'short' });
+                chartData.push({ label: label, value: dailyMap[dateStr] || 0 });
+            }
+        } else if (state.chartMode === 'weekly') {
+            // Последние 4 недели
+            for (let i = 3; i >= 0; i--) {
+                let weekSum = 0;
+                for (let j = 0; j < 7; j++) {
+                    const d = new Date(now);
+                    d.setDate(d.getDate() - (i * 7 + j));
+                    const dateStr = d.toISOString().split('T')[0];
+                    weekSum += (dailyMap[dateStr] || 0);
+                }
+                chartData.push({ label: (4 - i) + '-я нед.', value: weekSum });
+            }
+        } else if (state.chartMode === 'monthly') {
+            // Последние 5 месяцев
+            for (let i = 4; i >= 0; i--) {
+                const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                const mName = d.toLocaleDateString('ru-RU', { month: 'short' });
+                let monthSum = 0;
+                Object.keys(dailyMap).forEach(dateStr => {
+                    const itemDate = new Date(dateStr);
+                    if (itemDate.getMonth() === d.getMonth() && itemDate.getFullYear() === d.getFullYear()) {
+                        monthSum += dailyMap[dateStr];
+                    }
+                });
+                chartData.push({ label: mName, value: monthSum });
+            }
+        }
+
+        const maxVal = Math.max(...chartData.map(i => i.value), state.dailyGoal, 10);
+
+        chartData.forEach(item => {
+            const heightPct = Math.min(100, Math.round((item.value / maxVal) * 100));
+            const isCompleted = item.value >= (state.chartMode === 'daily' ? state.dailyGoal : state.dailyGoal * (state.chartMode === 'weekly' ? 7 : 30));
+            
+            let barClass = 'chart-bar';
+            if (isCompleted) barClass += ' filled';
+            else if (item.value > 0) barClass += ' active-day';
+
+            chartArea.innerHTML += `
+                <div class="chart-bar-wrap">
+                    <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">${item.value > 0 ? item.value : ''}</div>
+                    <div class="${barClass}" style="height: ${Math.max(8, heightPct)}%;"></div>
+                    <div class="chart-label">${item.label}</div>
+                </div>
+            `;
+        });
+    }
+
     function renderCalendar() {
         const titleEl = document.getElementById('calendar-month-title');
         const gridEl = document.getElementById('calendar-grid');
@@ -886,7 +1110,6 @@ const HTML_PAGE = `<!DOCTYPE html>
         const monthNames = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
         titleEl.innerText = monthNames[month] + " " + year;
 
-        // Собираем дни, когда были тренировки
         const completedDays = {};
         state.pushupsHistory.forEach(item => {
             if (item.created_at) {
