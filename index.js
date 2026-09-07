@@ -15,7 +15,6 @@ const db = new sqlite3.Database('./database.db', (err) => {
 });
 
 db.serialize(() => {
-    // Таблица подходов
     db.run(`CREATE TABLE IF NOT EXISTS workouts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT,
@@ -24,7 +23,6 @@ db.serialize(() => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // Таблица настроек и времени напоминаний
     db.run(`CREATE TABLE IF NOT EXISTS user_settings (
         user_id TEXT PRIMARY KEY,
         daily_goal INTEGER DEFAULT 100,
@@ -33,13 +31,13 @@ db.serialize(() => {
     )`);
 });
 
-// --- ВНИМАНИЕ: СЕРВИС УВЕДОМЛЕНИЙ ПО ВРЕМЕНИ ---
+// --- СЕРВИС УВЕДОМЛЕНИЙ ---
 function sendTelegramMessage(chatId, text) {
     if (!BOT_TOKEN || BOT_TOKEN === 'YOUR_TELEGRAM_BOT_TOKEN') return;
     const data = JSON.stringify({ chat_id: chatId, text: text, parse_mode: 'HTML' });
     const req = https.request({
         hostname: 'api.telegram.org',
-        path: `/bot${BOT_TOKEN}/sendMessage`,
+        path: '/bot' + BOT_TOKEN + '/sendMessage',
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
     });
@@ -48,12 +46,11 @@ function sendTelegramMessage(chatId, text) {
     req.end();
 }
 
-// Проверка совпадения времени каждую минуту (HH:MM)
 setInterval(() => {
     const now = new Date();
     const hours = String(now.getHours()).padStart(2, '0');
     const minutes = String(now.getMinutes()).padStart(2, '0');
-    const currentTime = `${hours}:${minutes}`;
+    const currentTime = hours + ':' + minutes;
 
     db.all(
         `SELECT user_id, daily_goal FROM user_settings WHERE reminder_time = ? AND notifications_enabled = 1`,
@@ -61,7 +58,7 @@ setInterval(() => {
         (err, rows) => {
             if (err || !rows) return;
             rows.forEach(user => {
-                const msg = `🏋️ <b>Время тренировки!</b>\nПора отжаться. Твоя дневная цель: <b>${user.daily_goal}</b> повторений.`;
+                const msg = '🏋️ <b>Время тренировки!</b>\nПора отжаться. Твоя дневная цель: <b>' + user.daily_goal + '</b> повторений.';
                 sendTelegramMessage(user.user_id, msg);
             });
         }
@@ -70,7 +67,6 @@ setInterval(() => {
 
 // --- API ENDPOINTS ---
 
-// Сохранение подхода
 app.post('/api/add', (req, res) => {
     const { user_id, count, exercise } = req.body;
     if (!count || count <= 0) return res.status(400).json({ error: 'Некорректное значение' });
@@ -85,11 +81,9 @@ app.post('/api/add', (req, res) => {
     );
 });
 
-// Реальная статистика, активные дни для календаря и данные графика за 7 дней
 app.get('/api/stats', (req, res) => {
     const userId = String(req.query.user_id || 'guest');
 
-    // 1. Даты активности для Календаря
     db.all(
         `SELECT DISTINCT DATE(created_at, 'localtime') as date FROM workouts WHERE user_id = ?`,
         [userId],
@@ -97,7 +91,6 @@ app.get('/api/stats', (req, res) => {
             if (err) return res.status(500).json({ error: err.message });
             const activeDates = activeRows.map(r => r.date);
 
-            // 2. Статистика за последние 7 дней для Графика
             db.all(
                 `SELECT DATE(created_at, 'localtime') as date, SUM(count) as total 
                  FROM workouts 
@@ -106,18 +99,13 @@ app.get('/api/stats', (req, res) => {
                 [userId],
                 (err, chartRows) => {
                     if (err) return res.status(500).json({ error: err.message });
-
-                    res.json({
-                        activeDates: activeDates,
-                        chartData: chartRows
-                    });
+                    res.json({ activeDates: activeDates, chartData: chartRows });
                 }
             );
         }
     );
 });
 
-// История подходов
 app.get('/api/history', (req, res) => {
     const userId = String(req.query.user_id || 'guest');
     db.all(
@@ -130,7 +118,6 @@ app.get('/api/history', (req, res) => {
     );
 });
 
-// Удаление записи
 app.delete('/api/delete/:id', (req, res) => {
     db.run(`DELETE FROM workouts WHERE id = ?`, [req.params.id], function (err) {
         if (err) return res.status(500).json({ error: err.message });
@@ -138,7 +125,6 @@ app.delete('/api/delete/:id', (req, res) => {
     });
 });
 
-// Настройки пользователя (цель и время уведомлений)
 app.get('/api/settings', (req, res) => {
     const userId = String(req.query.user_id || 'guest');
     db.get(`SELECT * FROM user_settings WHERE user_id = ?`, [userId], (err, row) => {
@@ -310,8 +296,8 @@ app.get('*', (req, res) => {
         }
 
         function switchTab(tabId, btn) {
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+            document.querySelectorAll('.nav-item').forEach(function(b) { b.classList.remove('active'); });
             document.getElementById('tab-' + tabId).classList.add('active');
             btn.classList.add('active');
 
@@ -335,11 +321,7 @@ app.get('*', (req, res) => {
         async function loadAnalytics() {
             const res = await fetch('/api/stats?user_id=' + userId);
             const data = await res.json();
-
-            // 1. Построение календаря текущего месяца с активными днями из БД
             renderCalendar(data.activeDates || []);
-
-            // 2. Построение графика за последние 7 дней из БД
             renderChart(data.chartData || []);
         }
 
@@ -351,12 +333,16 @@ app.get('*', (req, res) => {
             const daysInMonth = new Date(year, month + 1, 0).getDate();
 
             const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-            let html = dayNames.map(d => `<div class="cal-day-name">\${d}</div>`).join('');
+            let html = dayNames.map(function(d) {
+                return '<div class="cal-day-name">' + d + '</div>';
+            }).join('');
 
             for (let day = 1; day <= daysInMonth; day++) {
-                const dateStr = `\${year}-\${String(month + 1).padStart(2, '0')}-\${String(day).padStart(2, '0')}`;
+                const mStr = String(month + 1).padStart(2, '0');
+                const dStr = String(day).padStart(2, '0');
+                const dateStr = year + '-' + mStr + '-' + dStr;
                 const isActive = activeDates.includes(dateStr) ? 'active' : '';
-                html += `<div class="cal-day \${isActive}">\${day}</div>`;
+                html += '<div class="cal-day ' + isActive + '">' + day + '</div>';
             }
             calGrid.innerHTML = html;
         }
@@ -364,7 +350,6 @@ app.get('*', (req, res) => {
         function renderChart(chartData) {
             const ctx = document.getElementById('progressChart').getContext('2d');
             
-            // Генерация последних 7 дней для оси X
             const labels = [];
             const values = [];
             for (let i = 6; i >= 0; i--) {
@@ -373,7 +358,7 @@ app.get('*', (req, res) => {
                 const dateStr = d.toISOString().split('T')[0];
                 labels.push(d.toLocaleDateString('ru', { weekday: 'short', day: 'numeric' }));
                 
-                const found = chartData.find(item => item.date === dateStr);
+                const found = chartData.find(function(item) { return item.date === dateStr; });
                 values.push(found ? found.total : 0);
             }
 
@@ -403,18 +388,18 @@ app.get('*', (req, res) => {
                 return;
             }
 
-            container.innerHTML = data.history.map(item => `
-                <div class="history-item">
-                    <div>
-                        <div style="font-weight:600;">Отжимания</div>
-                        <div class="history-date">\${new Date(item.created_at).toLocaleString('ru')}</div>
-                    </div>
-                    <div style="display:flex; align-items:center; gap:10px;">
-                        <span class="history-val">+\${item.count}</span>
-                        <button class="btn-del" onclick="deleteHistory(\${item.id})">🗑</button>
-                    </div>
-                </div>
-            `).join('');
+            container.innerHTML = data.history.map(function(item) {
+                return '<div class="history-item">' +
+                    '<div>' +
+                        '<div style="font-weight:600;">Отжимания</div>' +
+                        '<div class="history-date">' + new Date(item.created_at).toLocaleString('ru') + '</div>' +
+                    '</div>' +
+                    '<div style="display:flex; align-items:center; gap:10px;">' +
+                        '<span class="history-val">+' + item.count + '</span>' +
+                        '<button class="btn-del" onclick="deleteHistory(' + item.id + ')">🗑</button>' +
+                    '</div>' +
+                '</div>';
+            }).join('');
         }
 
         async function deleteHistory(id) {
@@ -458,4 +443,4 @@ app.get('*', (req, res) => {
     `);
 });
 
-app.listen(port, () => console.log(`Сервер запущен на порту ${port}`));
+app.listen(port, () => console.log('Сервер запущен на порту ' + port));
