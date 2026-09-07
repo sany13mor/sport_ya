@@ -768,7 +768,7 @@ const HTML_PAGE = `<!DOCTYPE html>
     loadUserData();
 </script>
 </body>
-</html>\`;
+</html>`;
 
 app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api')) return next();
