@@ -1,4 +1,4 @@
-require('dotenv').config();
+try { require('dotenv').config(); } catch (e) {}
 const { Pool } = require('pg');
 const TelegramBot = require('node-telegram-bot-api');
 
