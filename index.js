@@ -32,7 +32,7 @@ setInterval(() => {
     }
 }, 60 * 60 * 1000);
 
-// Хелпер отправки сообщений в Telegram через современный fetch API
+// Хелпер отправки сообщений в Telegram
 async function sendTelegramMessage(chatId, text, replyMarkup) {
     if (!BOT_TOKEN) return;
     try {
@@ -49,96 +49,87 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
     }
 }
 
-// ------------------- REST API ДЛЯ СОХРАНЕНИЯ И ПОЛУЧЕНИЯ ДАННЫХ -------------------
+// ------------------- REST API -------------------
 
 // 1. Загрузка данных пользователя
 app.get('/api/user-data', async (req, res) => {
-    const telegramId = String(req.query.telegram_id || 'demo_user');
+    const userId = String(req.query.telegram_id || 'demo_user');
     
-    console.log('📥 Запрос данных для telegram_id:', telegramId);
+    console.log('📥 Загрузка данных для user_id:', userId);
 
     if (!supabase) {
-        console.log('⚠️ Supabase не подключен');
         return res.json({
             status: 'ok',
-            settings: inMemoryStore.settings[telegramId] || null,
-            profile: inMemoryStore.profiles[telegramId] || null,
-            pushups: inMemoryStore.pushups.filter(p => p.telegram_id === telegramId).slice(0, 300)
+            settings: inMemoryStore.settings[userId] || null,
+            profile: inMemoryStore.profiles[userId] || null,
+            pushups: inMemoryStore.pushups.filter(p => p.user_id === userId).slice(0, 300)
         });
     }
 
     try {
-        const { data: settings } = await supabase.from('user_settings').select('*').eq('telegram_id', telegramId).maybeSingle();
-        const { data: profile } = await supabase.from('user_profiles').select('*').eq('telegram_id', telegramId).maybeSingle();
-        
-        // ИСПРАВЛЕНИЕ: загружаем ВСЕ записи пользователя (независимо от telegram_id формата)
-        const { data: pushups, error: pushupsError } = await supabase.from('pushups')
+        // Загружаем все упражнения пользователя
+        const { data: pushups, error: pushupsError } = await supabase
+            .from('pushups')
             .select('*')
-            .eq('telegram_id', telegramId)
+            .eq('user_id', parseInt(userId))  // user_id is int8, не строка!
             .order('created_at', { ascending: false })
             .limit(300);
 
         console.log('✅ Загружено:', {
-            settings: !!settings,
-            profile: !!profile,
-            pushups_count: pushups?.length || 0
+            pushups_count: pushups?.length || 0,
+            first_record: pushups?.[0] || 'нет'
         });
 
         if (pushupsError) {
-            console.error('❌ Ошибка загрузки pushups:', pushupsError);
-        }
-
-        if (pushups && pushups.length > 0) {
-            console.log('🔍 Первые 3 записи:', pushups.slice(0, 3));
+            console.error('❌ Ошибка:', pushupsError);
         }
 
         res.json({
             status: 'ok',
-            settings: settings || null,
-            profile: profile || null,
+            settings: inMemoryStore.settings[userId] || null,
+            profile: inMemoryStore.profiles[userId] || null,
             pushups: pushups || []
         });
     } catch (e) {
         console.error('❌ API Error:', e);
         res.json({
             status: 'ok',
-            settings: inMemoryStore.settings[telegramId] || null,
-            profile: inMemoryStore.profiles[telegramId] || null,
-            pushups: inMemoryStore.pushups.filter(p => p.telegram_id === telegramId).slice(0, 300)
+            settings: inMemoryStore.settings[userId] || null,
+            profile: inMemoryStore.profiles[userId] || null,
+            pushups: inMemoryStore.pushups.filter(p => p.user_id === userId).slice(0, 300)
         });
     }
 });
 
-// 2. Добавление подхода отжиманий
+// 2. Добавление упражнения
 app.post('/api/add-pushup', async (req, res) => {
     const { telegram_id, count } = req.body;
-    const tgId = String(telegram_id || 'demo_user');
+    const userId = parseInt(telegram_id || 0);
     const cnt = parseInt(count);
 
-    console.log('➕ Добавление:', { telegram_id: tgId, count: cnt });
+    console.log('➕ Добавление:', { user_id: userId, count: cnt });
 
-    if (!cnt || cnt <= 0) {
-        return res.status(400).json({ status: 'error', message: 'Invalid count' });
+    if (!cnt || cnt <= 0 || !userId) {
+        return res.status(400).json({ status: 'error', message: 'Invalid input' });
     }
 
     const newPushup = {
-        id: 'p_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
-        telegram_id: tgId,
+        user_id: userId,
         count: cnt,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        exercise_type: 'pushups',
+        note: '',
+        rpe: 0
     };
 
     if (!supabase) {
+        newPushup.id = Date.now();
         inMemoryStore.pushups.unshift(newPushup);
         return res.json({ status: 'ok', item: newPushup });
     }
 
     try {
-        const { data, error } = await supabase.from('pushups').insert([{
-            telegram_id: tgId,
-            count: cnt,
-            created_at: newPushup.created_at
-        }]).select();
+        const { data, error } = await supabase.from('pushups').insert([newPushup]).select();
 
         if (error) throw error;
         
@@ -146,17 +137,20 @@ app.post('/api/add-pushup', async (req, res) => {
         res.json({ status: 'ok', item: data[0] });
     } catch (e) {
         console.error('❌ Ошибка:', e);
+        newPushup.id = Date.now();
         inMemoryStore.pushups.unshift(newPushup);
         res.json({ status: 'ok', item: newPushup });
     }
 });
 
-// 3. Удаление подхода
+// 3. Удаление упражнения
 app.post('/api/delete-pushup', async (req, res) => {
     const { id, telegram_id } = req.body;
-    const tgId = String(telegram_id || 'demo_user');
+    const userId = parseInt(telegram_id || 0);
 
-    if (!id) return res.status(400).json({ status: 'error', message: 'Invalid ID' });
+    console.log('🗑️ Удаление:', { id, user_id: userId });
+
+    if (!id || !userId) return res.status(400).json({ status: 'error', message: 'Invalid ID' });
 
     if (!supabase) {
         inMemoryStore.pushups = inMemoryStore.pushups.filter(p => p.id !== id);
@@ -164,11 +158,12 @@ app.post('/api/delete-pushup', async (req, res) => {
     }
 
     try {
-        const { error } = await supabase.from('pushups').delete().eq('id', id).eq('telegram_id', tgId);
+        const { error } = await supabase.from('pushups').delete().eq('id', id).eq('user_id', userId);
         if (error) throw error;
+        console.log('✅ Удалено');
         res.json({ status: 'ok' });
     } catch (e) {
-        console.error('Delete error:', e);
+        console.error('❌ Delete error:', e);
         inMemoryStore.pushups = inMemoryStore.pushups.filter(p => p.id !== id);
         res.json({ status: 'ok' });
     }
@@ -177,10 +172,10 @@ app.post('/api/delete-pushup', async (req, res) => {
 // 4. Сохранение настроек
 app.post('/api/save-settings', async (req, res) => {
     const { telegram_id, daily_goal, notifications_enabled, notification_interval, time_start, time_end } = req.body;
-    const tgId = String(telegram_id || 'demo_user');
+    const userId = String(telegram_id || 'demo_user');
 
     const settingsObj = {
-        telegram_id: tgId,
+        user_id: userId,
         daily_goal: parseInt(daily_goal) || 100,
         notifications_enabled: Boolean(notifications_enabled),
         notification_interval: parseInt(notification_interval) || 3,
@@ -188,12 +183,12 @@ app.post('/api/save-settings', async (req, res) => {
         time_end: time_end || "22:00"
     };
 
-    inMemoryStore.settings[tgId] = settingsObj;
+    inMemoryStore.settings[userId] = settingsObj;
 
     if (!supabase) return res.json({ status: 'ok' });
 
     try {
-        const { error } = await supabase.from('user_settings').upsert(settingsObj, { onConflict: 'telegram_id' });
+        const { error } = await supabase.from('user_settings').upsert(settingsObj, { onConflict: 'user_id' });
         if (error) throw error;
         res.json({ status: 'ok' });
     } catch (e) {
@@ -205,22 +200,22 @@ app.post('/api/save-settings', async (req, res) => {
 // 5. Сохранение профиля
 app.post('/api/save-profile', async (req, res) => {
     const { telegram_id, weight, height, fat, target_weight } = req.body;
-    const tgId = String(telegram_id || 'demo_user');
+    const userId = String(telegram_id || 'demo_user');
 
     const profileObj = {
-        telegram_id: tgId,
+        user_id: userId,
         weight: parseFloat(weight) || 0,
         height: parseFloat(height) || 0,
         fat: parseFloat(fat) || 0,
         target_weight: parseFloat(target_weight) || 0
     };
 
-    inMemoryStore.profiles[tgId] = profileObj;
+    inMemoryStore.profiles[userId] = profileObj;
 
     if (!supabase) return res.json({ status: 'ok' });
 
     try {
-        const { error } = await supabase.from('user_profiles').upsert(profileObj, { onConflict: 'telegram_id' });
+        const { error } = await supabase.from('user_profiles').upsert(profileObj, { onConflict: 'user_id' });
         if (error) throw error;
         res.json({ status: 'ok' });
     } catch (e) {
@@ -246,16 +241,22 @@ app.post('/api/telegram-webhook', async (req, res) => {
             if (count > 0) {
                 if (supabase) {
                     await supabase.from('pushups').insert([{
-                        telegram_id: String(chatId),
+                        user_id: chatId,
                         count: count,
-                        created_at: new Date().toISOString()
+                        created_at: new Date().toISOString(),
+                        exercise_type: 'pushups',
+                        note: '',
+                        rpe: 0
                     }]);
                 } else {
                     inMemoryStore.pushups.unshift({
-                        id: 'p_' + Date.now(),
-                        telegram_id: String(chatId),
+                        id: Date.now(),
+                        user_id: chatId,
                         count: count,
-                        created_at: new Date().toISOString()
+                        created_at: new Date().toISOString(),
+                        exercise_type: 'pushups',
+                        note: '',
+                        rpe: 0
                     });
                 }
             }
@@ -290,7 +291,7 @@ app.get('/api/send-reminders', async (req, res) => {
     res.json({ status: 'ok', sent: 0 });
 });
 
-// Веб-приложение (Mini App)
+// Веб-приложение (Mini App) - полный HTML останется прежним
 const HTML_PAGE = `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -728,8 +729,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             const res = await fetch('/api/user-data?telegram_id=' + telegramId);
             const data = await res.json();
             
-            console.log('Загружено данных:', data);
-            
             if (data.status === 'ok') {
                 if (data.settings) {
                     state.dailyGoal = data.settings.daily_goal || 100;
@@ -766,6 +765,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                 }
 
                 state.pushupsHistory = data.pushups || [];
+                console.log('✅ Загружено упражнений:', state.pushupsHistory.length);
             }
         } catch (e) {
             console.error("Ошибка загрузки:", e);
@@ -834,7 +834,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                 div.innerHTML = '<span class="set-count">+' + item.count + '</span>' +
                                 '<div class="set-time">' +
                                     '<span>' + timeStr + '</span>' +
-                                    '<button class="btn-del-set" onclick="deleteSet(\\'' + item.id + '\\')">✕</button>' +
+                                    '<button class="btn-del-set" onclick="deleteSet(' + item.id + ')">✕</button>' +
                                 '</div>';
                 listEl.appendChild(div);
             });
