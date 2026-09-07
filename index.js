@@ -6,6 +6,8 @@ const port = process.env.PORT || 3000;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const WEBAPP_URL = process.env.WEBAPP_URL || 'https://sport-ya.onrender.com';
 
 const supabase = (SUPABASE_URL && SUPABASE_KEY && SUPABASE_URL.startsWith('http')) 
     ? createClient(SUPABASE_URL, SUPABASE_KEY) 
@@ -22,7 +24,7 @@ const inMemoryStore = {
 // Проверка соединения с Supabase при старте сервера
 async function testSupabaseConnection() {
     if (!supabase) {
-        console.log('⚠️ Supabase клиент не инициализирован: проверьте переменные SUPABASE_URL и SUPABASE_KEY.');
+        console.log('⚠️ Supabase клиент не инициализирован.');
         return;
     }
     try {
@@ -30,7 +32,7 @@ async function testSupabaseConnection() {
         if (error) {
             console.error('❌ Ошибка связи с Supabase:', error.message);
         } else {
-            console.log('✅ Успешное подключение к Supabase! База данных полностью доступна.');
+            console.log('✅ Успешное подключение к Supabase!');
         }
     } catch (err) {
         console.error('❌ Исключение при подключении к Supabase:', err);
@@ -38,6 +40,28 @@ async function testSupabaseConnection() {
 }
 
 testSupabaseConnection();
+
+// Автоматическая установка Webhook для Telegram бота при старте
+async function setupTelegramWebhook() {
+    if (!BOT_TOKEN) {
+        console.log('⚠️ BOT_TOKEN не задан, Telegram бот отключен.');
+        return;
+    }
+    const webhookUrl = `${WEBAPP_URL}/api/telegram-webhook`;
+    try {
+        const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+        const data = await res.json();
+        if (data.ok) {
+            console.log('✅ Telegram Webhook успешно установлен:', webhookUrl);
+        } else {
+            console.error('❌ Ошибка установки Webhook:', data);
+        }
+    } catch (e) {
+        console.error('❌ Исключение при установке Webhook:', e);
+    }
+}
+
+setupTelegramWebhook();
 
 function parseTelegramId(rawId) {
     if (!rawId || rawId === 'demo_user') {
@@ -47,7 +71,139 @@ function parseTelegramId(rawId) {
     return isNaN(parsed) ? 356582454 : parsed;
 }
 
-// Эндпоинты API
+// Отправка сообщения в Telegram с кнопками
+async function sendNotificationToTelegram(chatId, customText = '💪 Время сделать отжимания!') {
+    if (!BOT_TOKEN) return;
+    
+    const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+    const payload = {
+        chat_id: chatId,
+        text: customText,
+        reply_markup: {
+            inline_keyboard: [
+                [
+                    { text: '+15', callback_data: 'add_15' },
+                    { text: '+20', callback_data: 'add_20' },
+                    { text: '+25', callback_data: 'add_25' },
+                    { text: '+30', callback_data: 'add_30' }
+                ],
+                [
+                    { text: '⏳ 15 мин', callback_data: 'snooze_15' },
+                    { text: '⏳ 30 мин', callback_data: 'snooze_30' },
+                    { text: '⏳ 45 мин', callback_data: 'snooze_45' },
+                    { text: '⏳ 1 час', callback_data: 'snooze_60' }
+                ]
+            ]
+        }
+    };
+
+    try {
+        await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+    } catch (e) {
+        console.error('❌ Ошибка отправки сообщения в Telegram:', e);
+    }
+}
+
+// Эндпоинт для обработки входящих запросов от Telegram (Webhook)
+app.post('/api/telegram-webhook', async (req, res) => {
+    res.status(200).json({ status: 'ok' }); // Сразу отвечаем Telegram, чтобы не было таймаута
+
+    const update = req.body;
+    
+    // 1. Обработка текстовых команд от пользователя
+    if (update.message && update.message.text) {
+        const chatId = update.message.chat.id;
+        const text = update.message.text;
+
+        if (text === '/start' || text === '/reminder') {
+            await sendNotificationToTelegram(chatId, '🏋️ Привет! Вот твои быстрые действия для тренировки:');
+        }
+    }
+
+    // 2. Обработка нажатий на инлайн-кнопки
+    if (update.callback_query) {
+        const cq = update.callback_query;
+        const chatId = cq.message.chat.id;
+        const userId = parseTelegramId(cq.from.id);
+        const data = cq.data;
+        const callbackQueryId = cq.id;
+
+        const answerUrl = `https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`;
+
+        if (data.startsWith('add_')) {
+            const count = parseInt(data.split('_')[1]);
+            const newPushup = {
+                user_id: userId,
+                count: count,
+                created_at: new Date().toISOString(),
+                exercise_type: 'pushups',
+                note: '',
+                rpe: 0
+            };
+
+            try {
+                if (supabase) {
+                    await supabase.from('pushups').insert([newPushup]);
+                } else {
+                    newPushup.id = Date.now();
+                    inMemoryStore.pushups.unshift(newPushup);
+                }
+
+                // Уведомляем пользователя во всплывающем окне Telegram
+                await fetch(answerUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ callback_query_id: callbackQueryId, text: `✅ Записано: +${count} отжиманий!` })
+                });
+
+                // Обновляем текст сообщения, чтобы показать успех
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: chatId,
+                        message_id: cq.message.message_id,
+                        text: `✅ Успешно записано: +${count} отжиманий!`
+                    })
+                });
+            } catch (e) {
+                console.error('Ошибка записи через бота:', e);
+            }
+        } 
+        else if (data.startsWith('snooze_')) {
+            const minutes = parseInt(data.split('_')[1]);
+            const ms = minutes * 60 * 1000;
+
+            // Отвечаем на нажатие кнопки
+            await fetch(answerUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ callback_query_id: callbackQueryId, text: `⏳ Напомню через ${minutes} мин.` })
+            });
+
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_id: chatId,
+                    message_id: cq.message.message_id,
+                    text: `⏳ Напоминание отложено на ${minutes} мин.`
+                })
+            });
+
+            // Устанавливаем таймер на повторное напоминание
+            setTimeout(async () => {
+                await sendNotificationToTelegram(chatId, `⏰ Прошло ${minutes} мин! Время сделать подход:`);
+            }, ms);
+        }
+    }
+});
+
+// Эндпоинты API приложения
 app.get('/api/user-data', async (req, res) => {
     const telegramIdRaw = req.query.telegram_id || 'demo_user';
     const userIdInt = parseTelegramId(telegramIdRaw);
