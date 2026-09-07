@@ -20,15 +20,6 @@ const inMemoryStore = {
     pushups: []
 };
 
-const snoozeMap = new Map();
-
-setInterval(() => {
-    const now = Date.now();
-    for (const [chatId, time] of snoozeMap.entries()) {
-        if (now > time) snoozeMap.delete(chatId);
-    }
-}, 60 * 60 * 1000);
-
 async function sendTelegramMessage(chatId, text, replyMarkup) {
     if (!BOT_TOKEN) return;
     try {
@@ -50,8 +41,6 @@ app.get('/api/user-data', async (req, res) => {
     const userIdInt = parseInt(telegramIdRaw) || 0;
     const userIdStr = String(telegramIdRaw);
     
-    console.log('📥 Загрузка данных для user_id:', userIdStr);
-
     if (!supabase) {
         return res.json({
             status: 'ok',
@@ -62,7 +51,6 @@ app.get('/api/user-data', async (req, res) => {
     }
 
     try {
-        // 1. Получаем историю отжиманий
         const { data: pushups, error: pushupsError } = await supabase
             .from('pushups')
             .select('*')
@@ -71,19 +59,17 @@ app.get('/api/user-data', async (req, res) => {
 
         if (pushupsError) console.error('❌ SQL Error (pushups):', pushupsError);
 
-        // 2. Получаем настройки пользователя (безопасный запрос)
         let settingsData = null;
         try {
             const { data } = await supabase.from('user_settings').select('*').eq('user_id', userIdStr).maybeSingle();
             settingsData = data;
-        } catch (e) { console.error('Настроек нет, используем дефолт'); }
+        } catch (e) { console.error('Настроек нет'); }
 
-        // 3. Получаем профиль пользователя (безопасный запрос)
         let profileData = null;
         try {
             const { data } = await supabase.from('user_profiles').select('*').eq('user_id', userIdStr).maybeSingle();
             profileData = data;
-        } catch (e) { console.error('Профиля нет, используем дефолт'); }
+        } catch (e) { console.error('Профиля нет'); }
 
         res.json({
             status: 'ok',
@@ -216,7 +202,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             --primary-light: #30B0FF;
             --accent-green: #34C759;
             --bg-main: #000000;
-            --bg-secondary: #121212;
             --glass-light: #1A1A1C;
             --glass-lighter: #2C2C2E;
             --text-primary: #FFFFFF;
@@ -238,6 +223,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             background-color: var(--bg-main);
             color: var(--text-primary);
             overflow: hidden;
+            position: fixed;
         }
 
         .app-wrapper {
@@ -245,15 +231,17 @@ const HTML_PAGE = `<!DOCTYPE html>
             height: 100%;
             display: flex;
             flex-direction: column;
+            overflow: hidden;
         }
 
         .content-area {
             flex: 1;
             overflow-y: auto;
-            padding: 16px 16px 100px 16px;
+            padding: 16px 16px 110px 16px;
+            -webkit-overflow-scrolling: touch;
         }
 
-        .screen { display: none; animation: fadeIn 0.3s ease; }
+        .screen { display: none; animation: fadeIn 0.2s ease; }
         .screen.active { display: block; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
@@ -296,6 +284,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             position: relative;
             width: 80px;
             height: 80px;
+            flex-shrink: 0;
         }
 
         .progress-ring-svg {
@@ -317,7 +306,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             stroke-linecap: round;
             stroke-dasharray: 226;
             stroke-dashoffset: 226;
-            transition: stroke-dashoffset 0.8s ease;
+            transition: stroke-dashoffset 0.4s ease;
         }
 
         .progress-ring-text {
@@ -340,15 +329,15 @@ const HTML_PAGE = `<!DOCTYPE html>
             background: var(--glass-lighter);
             border: none;
             border-radius: 12px;
-            padding: 10px 0;
+            padding: 12px 0;
             color: var(--text-primary);
             font-weight: 700;
-            font-size: 15px;
+            font-size: 14px;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: background 0.15s;
         }
         
-        .quick-btn:active { background: #3a3a3c; }
+        .quick-btn:active { background: #3a3a3c; transform: scale(0.96); }
 
         .input-group {
             display: flex;
@@ -377,9 +366,10 @@ const HTML_PAGE = `<!DOCTYPE html>
             font-weight: 700;
             font-size: 15px;
             cursor: pointer;
+            flex-shrink: 0;
         }
         
-        .btn-green:active { opacity: 0.8; }
+        .btn-green:active { opacity: 0.8; transform: scale(0.96); }
 
         .exercise-item {
             background: var(--glass-lighter);
@@ -390,7 +380,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             align-items: center;
             margin-bottom: 8px;
         }
-        
         .exercise-item:last-child { margin-bottom: 0; }
 
         .form-group { margin-bottom: 16px; }
@@ -400,6 +389,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             color: var(--text-secondary);
             margin-bottom: 8px;
             text-transform: uppercase;
+            font-weight: 600;
         }
 
         .form-input, .form-select {
@@ -413,18 +403,63 @@ const HTML_PAGE = `<!DOCTYPE html>
             outline: none;
         }
 
+        /* Calendar Grid Styles */
+        .calendar-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            font-weight: 700;
+            font-size: 16px;
+        }
+        .calendar-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 6px;
+            text-align: center;
+        }
+        .calendar-weekday {
+            font-size: 11px;
+            color: var(--text-secondary);
+            font-weight: 600;
+            padding-bottom: 4px;
+        }
+        .calendar-day {
+            aspect-ratio: 1;
+            background: var(--glass-lighter);
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 600;
+            position: relative;
+        }
+        .calendar-day.empty { background: transparent; }
+        .calendar-day.completed {
+            background: rgba(52, 199, 89, 0.2);
+            border: 1px solid var(--accent-green);
+            color: var(--accent-green);
+        }
+        .calendar-day.today {
+            border: 1px solid var(--primary);
+        }
+
         .bottom-nav {
             position: fixed;
             bottom: 0;
             left: 0;
             right: 0;
-            height: 80px;
+            height: 75px;
             background: var(--glass-light);
             display: flex;
             justify-content: space-around;
-            padding-top: 12px;
+            align-items: flex-start;
+            padding-top: 10px;
             border-top: 1px solid rgba(255,255,255,0.05);
             padding-bottom: env(safe-area-inset-bottom);
+            z-index: 100;
         }
 
         .nav-item {
@@ -436,6 +471,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             font-size: 10px;
             font-weight: 600;
             cursor: pointer;
+            width: 25%;
         }
 
         .nav-item.active { color: var(--primary); }
@@ -466,12 +502,11 @@ const HTML_PAGE = `<!DOCTYPE html>
         
         <!-- ГЛАВНАЯ ЭКРАН -->
         <div id="screen-main" class="screen active">
-            
             <div class="glass-card header-top">
-                <div class="header-icon">1</div>
+                <div class="header-icon">🏋️</div>
                 <div>
                     <div style="font-size: 10px; color: var(--text-secondary); letter-spacing: 1px; font-weight: 700;">IOS FITNESS TRACKER</div>
-                    <div style="font-size: 20px; font-weight: 700;">13-й</div>
+                    <div style="font-size: 20px; font-weight: 700;">Отжимания</div>
                 </div>
             </div>
 
@@ -504,7 +539,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                     <button class="quick-btn" onclick="addQuick(35)">+35</button>
                 </div>
                 <div class="input-group">
-                    <input type="number" id="custom-count" class="glass-input" placeholder="Введите своё число..." inputmode="numeric">
+                    <input type="number" id="custom-count" class="glass-input" placeholder="Своё число..." inputmode="numeric">
                     <button class="btn-green" onclick="submitCustom()">Записать</button>
                 </div>
             </div>
@@ -518,24 +553,26 @@ const HTML_PAGE = `<!DOCTYPE html>
         <!-- КАЛЕНДАРЬ -->
         <div id="screen-calendar" class="screen">
             <div class="glass-card">
-                <div class="section-title">Календарь в разработке</div>
-                <p style="color: var(--text-secondary); font-size: 14px;">Здесь будет сетка календаря.</p>
+                <div class="calendar-header" id="calendar-month-title">Календарь</div>
+                <div class="calendar-grid" id="calendar-grid"></div>
             </div>
         </div>
 
         <!-- ПРОГРЕСС -->
         <div id="screen-progress" class="screen">
             <div class="glass-card">
-                <div class="section-title">Статистика</div>
-                <p style="color: var(--text-secondary); font-size: 14px;">Здесь будет график.</p>
+                <div class="section-title">Общая статистика</div>
+                <div style="font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
+                    Всего записей в истории: <span id="stat-total-sets" style="color: var(--text-primary); font-weight: 700;">0</span><br>
+                    Суммарно повторений: <span id="stat-total-reps" style="color: var(--accent-green); font-weight: 700;">0</span>
+                </div>
             </div>
         </div>
 
-        <!-- НАСТРОЙКИ И ПРОФИЛЬ -->
+        <!-- НАСТРОЙКИ -->
         <div id="screen-settings" class="screen">
-            
             <div class="glass-card">
-                <div class="section-title">Настройки тренировок</div>
+                <div class="section-title">Цель и уведомления</div>
                 <div class="form-group">
                     <label class="form-label">Дневная цель (повторений)</label>
                     <input type="number" id="set-daily-goal" class="form-input" value="100">
@@ -546,6 +583,26 @@ const HTML_PAGE = `<!DOCTYPE html>
                         <div class="toggle-knob"></div>
                     </div>
                 </div>
+                <div class="form-group">
+                    <label class="form-label">Интервал напоминаний</label>
+                    <select id="set-notif-interval" class="form-select">
+                        <option value="1">Каждый 1 час</option>
+                        <option value="2">Каждые 2 часа</option>
+                        <option value="3" selected>Каждые 3 часа</option>
+                        <option value="4">Каждые 4 часа</option>
+                        <option value="5">Каждые 5 часов</option>
+                    </select>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <div class="form-group">
+                        <label class="form-label">Начало</label>
+                        <input type="time" id="set-time-start" class="form-input" value="09:00">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Конец</label>
+                        <input type="time" id="set-time-end" class="form-input" value="22:00">
+                    </div>
+                </div>
                 <button class="btn-green" onclick="saveSettingsData()" style="width: 100%; margin-top: 10px;">Сохранить настройки</button>
             </div>
 
@@ -554,7 +611,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                     <div class="form-group">
                         <label class="form-label">Вес (кг)</label>
-                        <input type="number" id="prof-weight" class="form-input">
+                        <input type="number" id="prof-weight" class="form-input" step="0.1">
                     </div>
                     <div class="form-group">
                         <label class="form-label">Рост (см)</label>
@@ -562,11 +619,11 @@ const HTML_PAGE = `<!DOCTYPE html>
                     </div>
                     <div class="form-group">
                         <label class="form-label">% Жира</label>
-                        <input type="number" id="prof-fat" class="form-input">
+                        <input type="number" id="prof-fat" class="form-input" step="0.1">
                     </div>
                     <div class="form-group">
-                        <label class="form-label">Целевой вес (кг)</label>
-                        <input type="number" id="prof-target-weight" class="form-input">
+                        <label class="form-label">Цель (кг)</label>
+                        <input type="number" id="prof-target-weight" class="form-input" step="0.1">
                     </div>
                 </div>
                 <button class="btn-green" onclick="saveProfileData()" style="width: 100%; margin-top: 10px; background: var(--primary); color: white;">Сохранить профиль</button>
@@ -575,21 +632,21 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     </div>
 
-    <!-- Навигация -->
+    <!-- Нижняя навигация -->
     <div class="bottom-nav">
-        <div class="nav-item active" onclick="switchTab('main')">
+        <div class="nav-item active" onclick="switchTab('main', event)">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
             <span>Главная</span>
         </div>
-        <div class="nav-item" onclick="switchTab('calendar')">
+        <div class="nav-item" onclick="switchTab('calendar', event)">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11z"/></svg>
             <span>Календарь</span>
         </div>
-        <div class="nav-item" onclick="switchTab('progress')">
+        <div class="nav-item" onclick="switchTab('progress', event)">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
             <span>Прогресс</span>
         </div>
-        <div class="nav-item" onclick="switchTab('settings')">
+        <div class="nav-item" onclick="switchTab('settings', event)">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
             <span>Настройки</span>
         </div>
@@ -605,6 +662,9 @@ const HTML_PAGE = `<!DOCTYPE html>
     let state = {
         dailyGoal: 100,
         notifEnabled: true,
+        notificationInterval: 3,
+        timeStart: "09:00",
+        timeEnd: "22:00",
         pushupsHistory: []
     };
 
@@ -612,12 +672,17 @@ const HTML_PAGE = `<!DOCTYPE html>
         if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
     }
 
-    function switchTab(tab) {
+    function switchTab(tab, event) {
         triggerHaptic();
         document.querySelectorAll('.screen').forEach(el => el.classList.remove('active'));
         document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
         document.getElementById('screen-' + tab).classList.add('active');
-        event.currentTarget.classList.add('active');
+        if (event && event.currentTarget) {
+            event.currentTarget.classList.add('active');
+        }
+        if (tab === 'calendar') {
+            renderCalendar();
+        }
     }
 
     async function loadUserData() {
@@ -628,19 +693,24 @@ const HTML_PAGE = `<!DOCTYPE html>
             if (data.status === 'ok') {
                 state.pushupsHistory = data.pushups || [];
                 
-                // Подтягиваем настройки в UI
                 if (data.settings) {
                     state.dailyGoal = data.settings.daily_goal || 100;
                     state.notifEnabled = data.settings.notifications_enabled !== false;
+                    state.notificationInterval = data.settings.notification_interval || 3;
+                    state.timeStart = data.settings.time_start || "09:00";
+                    state.timeEnd = data.settings.time_end || "22:00";
+
                     document.getElementById('set-daily-goal').value = state.dailyGoal;
                     document.getElementById('goal-display').innerText = state.dailyGoal;
+                    document.getElementById('set-notif-interval').value = state.notificationInterval;
+                    document.getElementById('set-time-start').value = state.timeStart;
+                    document.getElementById('set-time-end').value = state.timeEnd;
                     
                     const toggle = document.getElementById('set-notif-toggle');
                     if (state.notifEnabled) toggle.classList.add('on');
                     else toggle.classList.remove('on');
                 }
 
-                // Подтягиваем профиль в UI
                 if (data.profile) {
                     document.getElementById('prof-weight').value = data.profile.weight || '';
                     document.getElementById('prof-height').value = data.profile.height || '';
@@ -657,7 +727,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     function updateProgressUI() {
         const todayStr = new Date().toISOString().split('T')[0];
-        const todaySets = state.pushupsHistory.filter(i => i.created_at.startsWith(todayStr));
+        const todaySets = state.pushupsHistory.filter(i => i.created_at && i.created_at.startsWith(todayStr));
         const total = todaySets.reduce((a, b) => a + b.count, 0);
 
         document.getElementById('today-total-ui').innerHTML = total + ' <span style="font-size: 14px; color: var(--text-secondary); font-weight: 500;">/ ' + state.dailyGoal + '</span>';
@@ -689,10 +759,28 @@ const HTML_PAGE = `<!DOCTYPE html>
                     </div>\`;
             });
         }
+
+        // Обновляем статистику
+        document.getElementById('stat-total-sets').innerText = state.pushupsHistory.length;
+        document.getElementById('stat-total-reps').innerText = state.pushupsHistory.reduce((a, b) => a + b.count, 0);
     }
 
+    // Оптимизированный мгновенный ввод (Optimistic UI)
     async function addQuick(count) {
         triggerHaptic();
+        
+        // Создаем временный элемент для мгновенного отклика (0мс пинг)
+        const tempId = 'temp_' + Date.now();
+        const tempItem = {
+            id: tempId,
+            user_id: telegramId,
+            count: count,
+            created_at: new Date().toISOString()
+        };
+        
+        state.pushupsHistory.unshift(tempItem);
+        updateProgressUI();
+
         try {
             const res = await fetch('/api/add-pushup', {
                 method: 'POST',
@@ -700,31 +788,39 @@ const HTML_PAGE = `<!DOCTYPE html>
                 body: JSON.stringify({ telegram_id: telegramId, count: count })
             });
             const data = await res.json();
-            if (data.status === 'ok') state.pushupsHistory.unshift(data.item);
-        } catch (e) { console.error(e); }
+            if (data.status === 'ok') {
+                const idx = state.pushupsHistory.findIndex(i => i.id === tempId);
+                if (idx !== -1) {
+                    state.pushupsHistory[idx] = data.item;
+                }
+            }
+        } catch (e) {
+            console.error(e);
+            state.pushupsHistory = state.pushupsHistory.filter(i => i.id !== tempId);
+        }
         updateProgressUI();
     }
 
     function submitCustom() {
-        const val = parseInt(document.getElementById('custom-count').value);
+        const inputEl = document.getElementById('custom-count');
+        const val = parseInt(inputEl.value);
         if (val > 0) {
             addQuick(val);
-            document.getElementById('custom-count').value = '';
+            inputEl.value = '';
         }
     }
 
     async function deleteSet(id) {
         triggerHaptic();
+        state.pushupsHistory = state.pushupsHistory.filter(i => i.id !== id);
+        updateProgressUI();
+
         try {
-            const res = await fetch('/api/delete-pushup', {
+            await fetch('/api/delete-pushup', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ id: id, telegram_id: telegramId })
             });
-            if ((await res.json()).status === 'ok') {
-                state.pushupsHistory = state.pushupsHistory.filter(i => i.id !== id);
-                updateProgressUI();
-            }
         } catch (e) { console.error(e); }
     }
 
@@ -737,13 +833,27 @@ const HTML_PAGE = `<!DOCTYPE html>
     async function saveSettingsData() {
         triggerHaptic();
         const goal = parseInt(document.getElementById('set-daily-goal').value) || 100;
+        const interval = parseInt(document.getElementById('set-notif-interval').value) || 3;
+        const timeStart = document.getElementById('set-time-start').value || "09:00";
+        const timeEnd = document.getElementById('set-time-end').value || "22:00";
+
         state.dailyGoal = goal;
+        state.notificationInterval = interval;
+        state.timeStart = timeStart;
+        state.timeEnd = timeEnd;
         document.getElementById('goal-display').innerText = goal;
         
         await fetch('/api/save-settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ telegram_id: telegramId, daily_goal: goal, notifications_enabled: state.notifEnabled })
+            body: JSON.stringify({ 
+                telegram_id: telegramId, 
+                daily_goal: goal, 
+                notifications_enabled: state.notifEnabled,
+                notification_interval: interval,
+                time_start: timeStart,
+                time_end: timeEnd
+            })
         });
         if(tg) tg.showAlert("Настройки сохранены!");
         updateProgressUI();
@@ -763,6 +873,55 @@ const HTML_PAGE = `<!DOCTYPE html>
             })
         });
         if(tg) tg.showAlert("Профиль обновлен!");
+    }
+
+    function renderCalendar() {
+        const titleEl = document.getElementById('calendar-month-title');
+        const gridEl = document.getElementById('calendar-grid');
+        
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = now.getMonth();
+        
+        const monthNames = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+        titleEl.innerText = monthNames[month] + " " + year;
+
+        // Собираем дни, когда были тренировки
+        const completedDays = {};
+        state.pushupsHistory.forEach(item => {
+            if (item.created_at) {
+                const dateKey = item.created_at.split('T')[0];
+                completedDays[dateKey] = (completedDays[dateKey] || 0) + item.count;
+            }
+        });
+
+        gridEl.innerHTML = '';
+        const weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+        weekdays.forEach(wd => {
+            gridEl.innerHTML += '<div class="calendar-weekday">' + wd + '</div>';
+        });
+
+        const firstDayIndex = (new Date(year, month, 1).getDay() + 6) % 7;
+        const totalDays = new Date(year, month + 1, 0).getDate();
+
+        for (let i = 0; i < firstDayIndex; i++) {
+            gridEl.innerHTML += '<div class="calendar-day empty"></div>';
+        }
+
+        const todayStr = now.toISOString().split('T')[0];
+
+        for (let day = 1; day <= totalDays; day++) {
+            const dayStr = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+            const isCompleted = completedDays[dayStr] >= state.dailyGoal;
+            const hasActivity = completedDays[dayStr] > 0;
+            const isToday = (dayStr === todayStr);
+
+            let classes = 'calendar-day';
+            if (isCompleted || hasActivity) classes += ' completed';
+            if (isToday) classes += ' today';
+
+            gridEl.innerHTML += '<div class="' + classes + '"><span>' + day + '</span></div>';
+        }
     }
 
     loadUserData();
