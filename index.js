@@ -1,7 +1,6 @@
 const express = require('express');
 const { Pool } = require('pg');
 const TelegramBot = require('node-telegram-bot-api');
-const crypto = require('crypto');
 
 const app = express();
 const port = process.env.PORT || 10000;
@@ -11,55 +10,35 @@ const token = process.env.BOT_TOKEN;
 let bot;
 if (token) {
     bot = new TelegramBot(token, { polling: true });
-
-    // 16. Быстрый ввод из чата бота + Inline-клавиатура
+    
     bot.onText(/\/start/, (msg) => {
         const chatId = msg.chat.id;
-        bot.sendMessage(chatId, '💪 Привет! Выберите действие или быстрый подход:', {
+        bot.sendMessage(chatId, 'Привет! Нажми кнопку ниже, чтобы открыть обновленный трекер:', {
             reply_markup: {
-                inline_keyboard: [
-                    [{ text: '📊 Открыть WebApp Трекер', web_app: { url: process.env.WEBAPP_URL || 'https://sport-ya.onrender.com' } }],
-                    [
-                        { text: '+15', callback_data: 'quick_add_15' },
-                        { text: '+20', callback_data: 'quick_add_20' },
-                        { text: '+25', callback_data: 'quick_add_25' },
-                        { text: '+30', callback_data: 'quick_add_30' }
-                    ]
-                ]
+                inline_keyboard: [[
+                    { text: '📊 Открыть iOS Трекер', web_app: { url: process.env.WEBAPP_URL || 'https://sport-ya.onrender.com' } }
+                ]]
             }
         });
-    });
-
-    bot.on('callback_query', async (query) => {
-        if (query.data && query.data.startsWith('quick_add_')) {
-            const count = parseInt(query.data.split('_')[2]);
-            const userId = query.from.id;
-            try {
-                await pool.query(
-                    'INSERT INTO exercises (user_id, count, exercise_type) VALUES ($1, $2, $3)',
-                    [userId, count, 'pushups']
-                );
-                bot.answerCallbackQuery(query.id, { text: `✅ Добавлено +${count} отжиманий!` });
-                bot.sendMessage(userId, `🚀 Записано +${count} отжиманий из чата!`);
-            } catch (err) {
-                console.error('Ошибка добавления из чата:', err);
-                bot.answerCallbackQuery(query.id, { text: '❌ Ошибка записи' });
-            }
-        }
     });
 }
 
 // Подключение к Supabase (PostgreSQL)
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+    ssl: { rejectUnauthorized: false }
 });
 
 // Автоинициализация и миграция таблиц
 async function initDB() {
     try {
-        // Миграция старых таблиц и создание новых
         await pool.query(`
+            CREATE TABLE IF NOT EXISTS pushups (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                count INT NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id BIGINT PRIMARY KEY,
                 goal INT DEFAULT 100,
@@ -67,40 +46,12 @@ async function initDB() {
                 reminder_interval_hours INT DEFAULT 3,
                 reminder_start_hour INT DEFAULT 10,
                 reminder_end_hour INT DEFAULT 23,
-                timezone VARCHAR(50) DEFAULT 'UTC',
-                presets JSONB DEFAULT '[15, 20, 25, 30, 35]'::jsonb,
                 last_reminder_sent TIMESTAMP WITH TIME ZONE
             );
-
-            CREATE TABLE IF NOT EXISTS exercises (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                exercise_type VARCHAR(50) DEFAULT 'pushups',
-                count INT NOT NULL,
-                note TEXT DEFAULT '',
-                rpe INT DEFAULT 0,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );
-
-            CREATE TABLE IF NOT EXISTS user_achievements (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                achievement_key VARCHAR(50) NOT NULL,
-                unlocked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                UNIQUE(user_id, achievement_key)
-            );
-
-            -- Миграция данных из старой таблицы pushups при наличии
-            DO $$
-            BEGIN
-                IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'pushups') THEN
-                    INSERT INTO exercises (user_id, count, created_at, exercise_type)
-                    SELECT user_id, count, created_at, 'pushups' FROM pushups;
-                    ALTER TABLE pushups RENAME TO pushups_old_backup;
-                END IF;
-            END $$;
+            ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS reminder_start_hour INT DEFAULT 10;
+            ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS reminder_end_hour INT DEFAULT 23;
         `);
-        console.log('✅ База данных Supabase обновлена и готова к работе!');
+        console.log('✅ База данных Supabase и таблицы готовы к работе!');
     } catch (err) {
         console.error('❌ Ошибка инициализации БД:', err);
     }
@@ -109,40 +60,7 @@ initDB();
 
 app.use(express.json());
 
-// 1. Валидация initData Telegram
-function verifyTelegramInitData(initData) {
-    if (!token || !initData) return true; // Разрешаем локальное тестирование если токена нет
-    try {
-        const urlParams = new URLSearchParams(initData);
-        const hash = urlParams.get('hash');
-        urlParams.delete('hash');
-        const dataCheckString = Array.from(urlParams.entries())
-            .map(([k, v]) => `${k}=${v}`)
-            .sort()
-            .join('\n');
-        const secretKey = crypto.createHmac('sha256', 'WebAppData').update(token).digest();
-        const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-        return calculatedHash === hash;
-    } catch (e) {
-        return false;
-    }
-}
-
-// 4. Rate Limiting Middleware
-const rateLimitMap = new Map();
-function rateLimiter(req, res, next) {
-    const userId = req.body.user_id || req.query.user_id;
-    if (!userId) return next();
-    const now = Date.now();
-    const lastRequest = rateLimitMap.get(userId) || 0;
-    if (now - lastRequest < 500) { // Минимум 500мс между запросами
-        return res.status(429).json({ error: 'Слишком много запросов. Подождите.' });
-    }
-    rateLimitMap.set(userId, now);
-    next();
-}
-
-// 17. Автоматические отчеты и уведомления
+// Планировщик напоминаний с учетом временного диапазона
 setInterval(async () => {
     if (!bot) return;
     try {
@@ -150,26 +68,18 @@ setInterval(async () => {
             SELECT s.user_id, s.reminder_interval_hours 
             FROM user_settings s
             WHERE s.reminders_enabled = true 
-              AND EXTRACT(HOUR FROM NOW() AT TIMEZONE s.timezone) >= s.reminder_start_hour
-              AND EXTRACT(HOUR FROM NOW() AT TIMEZONE s.timezone) < s.reminder_end_hour
+              AND EXTRACT(HOUR FROM NOW() AT TIMEZONE 'UTC') >= s.reminder_start_hour
+              AND EXTRACT(HOUR FROM NOW() AT TIMEZONE 'UTC') < s.reminder_end_hour
               AND (s.last_reminder_sent IS NULL OR s.last_reminder_sent < NOW() - (s.reminder_interval_hours || ' hours')::INTERVAL)
               AND NOT EXISTS (
-                  SELECT 1 FROM exercises e 
-                  WHERE e.user_id = s.user_id 
-                    AND e.created_at >= CURRENT_DATE
+                  SELECT 1 FROM pushups p 
+                  WHERE p.user_id = s.user_id 
+                    AND p.created_at >= CURRENT_DATE
               )
         `);
 
         for (const row of res.rows) {
-            bot.sendMessage(row.user_id, '💪 Время подходить к цели! Сделайте быстрый подход через кнопки ниже:', {
-                reply_markup: {
-                    inline_keyboard: [[
-                        { text: '+15', callback_data: 'quick_add_15' },
-                        { text: '+25', callback_data: 'quick_add_25' },
-                        { text: '📊 Открыть WebApp', web_app: { url: process.env.WEBAPP_URL || 'https://sport-ya.onrender.com' } }
-                    ]]
-                }
-            });
+            bot.sendMessage(row.user_id, '💪 Не забудь выполнить подход сегодня! Трекер ждет новых отжиманий.');
             await pool.query('UPDATE user_settings SET last_reminder_sent = NOW() WHERE user_id = $1', [row.user_id]);
         }
     } catch (e) {
@@ -179,10 +89,9 @@ setInterval(async () => {
 
 // --- API ---
 
-// 1 & 6 & 7. Данные пользователя, Серии (Streaks) и Достижения
+// 1. Данные пользователя
 app.get('/api/user-data', async (req, res) => {
     const userId = req.query.user_id;
-    const exerciseType = req.query.exercise_type || 'pushups';
     if (!userId) return res.status(400).json({ error: 'User ID required' });
 
     try {
@@ -193,186 +102,71 @@ app.get('/api/user-data', async (req, res) => {
         }
 
         const todayRes = await pool.query(`
-            SELECT id, count, note, rpe, created_at 
-            FROM exercises 
-            WHERE user_id = $1 AND exercise_type = $2 AND created_at >= CURRENT_DATE 
+            SELECT id, count, created_at 
+            FROM pushups 
+            WHERE user_id = $1 AND created_at >= CURRENT_DATE 
             ORDER BY created_at DESC
-        `, [userId, exerciseType]);
+        `, [userId]);
 
-        const totalRes = await pool.query(`
-            SELECT SUM(count) as total_count, COUNT(DISTINCT DATE(created_at)) as active_days 
-            FROM exercises WHERE user_id = $1 AND exercise_type = $2
-        `, [userId, exerciseType]);
-
-        // Расчет серий (Streak)
-        const streakRes = await pool.query(`
-            WITH days AS (
-                SELECT DISTINCT DATE(created_at) as day
-                FROM exercises
-                WHERE user_id = $1 AND exercise_type = $2
-                ORDER BY day DESC
-            )
-            SELECT day FROM days;
-        `, [userId, exerciseType]);
-
-        let streak = 0;
-        let checkDate = new Date();
-        const dates = streakRes.rows.map(r => new Date(r.day).toISOString().split('T')[0]);
-        
-        while (true) {
-            const dateStr = checkDate.toISOString().split('T')[0];
-            if (dates.includes(dateStr)) {
-                streak++;
-                checkDate.setDate(checkDate.getDate() - 1);
-            } else if (streak === 0) {
-                // Пытаемся проверить вчерашний день, если сегодня еще не делал
-                checkDate.setDate(checkDate.getDate() - 1);
-                const prevStr = checkDate.toISOString().split('T')[0];
-                if (dates.includes(prevStr)) {
-                    streak++;
-                    checkDate.setDate(checkDate.getDate() - 1);
-                } else break;
-            } else break;
-        }
-
-        // Проверка ачивок
-        const achievementsRes = await pool.query('SELECT achievement_key FROM user_achievements WHERE user_id = $1', [userId]);
+        const totalRes = await pool.query('SELECT SUM(count) as total_count, COUNT(DISTINCT DATE(created_at)) as active_days FROM pushups WHERE user_id = $1', [userId]);
 
         res.json({
             success: true,
             settings: settingsRes.rows[0],
             todayHistory: todayRes.rows,
             totalCount: parseInt(totalRes.rows[0].total_count) || 0,
-            activeDays: parseInt(totalRes.rows[0].active_days) || 0,
-            streak: streak,
-            achievements: achievementsRes.rows.map(a => a.achievement_key)
+            activeDays: parseInt(totalRes.rows[0].active_days) || 0
         });
     } catch (err) {
-        console.error(err);
         res.status(500).json({ error: 'Database error' });
     }
 });
 
-// 2 & 12 & 14 & 15. Добавление подхода с RPE, заметкой и упражнением
-app.post('/api/add', rateLimiter, async (req, res) => {
-    const { user_id, count, exercise_type, note, rpe, initData } = req.body;
-    if (!verifyTelegramInitData(initData)) return res.status(403).json({ error: 'Invalid initData' });
+// 2. Добавление подхода
+app.post('/api/add', async (req, res) => {
+    const { user_id, count } = req.body;
     if (!user_id || !count) return res.status(400).json({ error: 'Invalid data' });
 
     try {
-        await pool.query(
-            'INSERT INTO exercises (user_id, count, exercise_type, note, rpe) VALUES ($1, $2, $3, $4, $5)',
-            [user_id, count, exercise_type || 'pushups', note || '', rpe || 0]
-        );
-
-        // Проверка достижений при добавлении
-        const totalRes = await pool.query('SELECT SUM(count) as total FROM exercises WHERE user_id = $1', [user_id]);
-        const total = parseInt(totalRes.rows[0].total) || 0;
-
-        if (total >= 1000) {
-            await pool.query('INSERT INTO user_achievements (user_id, achievement_key) VALUES ($1, $2) ON CONFLICT DO NOTHING', [user_id, '1000_rep_club']);
-        }
-
+        await pool.query('INSERT INTO pushups (user_id, count) VALUES ($1, $2)', [user_id, count]);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Database error' });
     }
 });
 
-// 3. Редактирование и удаление подхода
-app.delete('/api/delete-set/:id', async (req, res) => {
-    const { user_id } = req.body;
-    try {
-        await pool.query('DELETE FROM exercises WHERE id = $1 AND user_id = $2', [req.params.id, user_id]);
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: 'Database error' });
-    }
-});
-
-app.put('/api/edit-set/:id', async (req, res) => {
-    const { user_id, count, note } = req.body;
-    try {
-        await pool.query('UPDATE exercises SET count = $1, note = $2 WHERE id = $3 AND user_id = $4', [count, note, req.params.id, user_id]);
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: 'Database error' });
-    }
-});
-
-// 2 & 13. Сохранение настроек (таймзона, пресеты)
+// 3. Сохранение настроек
 app.post('/api/settings', async (req, res) => {
-    const { user_id, goal, reminders_enabled, reminder_interval_hours, reminder_start_hour, reminder_end_hour, timezone, presets } = req.body;
+    const { user_id, goal, reminders_enabled, reminder_interval_hours, reminder_start_hour, reminder_end_hour } = req.body;
     try {
         await pool.query(`
-            INSERT INTO user_settings (user_id, goal, reminders_enabled, reminder_interval_hours, reminder_start_hour, reminder_end_hour, timezone, presets)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            INSERT INTO user_settings (user_id, goal, reminders_enabled, reminder_interval_hours, reminder_start_hour, reminder_end_hour)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (user_id) DO UPDATE SET
                 goal = EXCLUDED.goal,
                 reminders_enabled = EXCLUDED.reminders_enabled,
                 reminder_interval_hours = EXCLUDED.reminder_interval_hours,
                 reminder_start_hour = EXCLUDED.reminder_start_hour,
-                reminder_end_hour = EXCLUDED.reminder_end_hour,
-                timezone = EXCLUDED.timezone,
-                presets = EXCLUDED.presets
-        `, [user_id, goal, reminders_enabled, reminder_interval_hours, reminder_start_hour, reminder_end_hour, timezone || 'UTC', JSON.stringify(presets || [15, 20, 25, 30, 35])]);
+                reminder_end_hour = EXCLUDED.reminder_end_hour
+        `, [user_id, goal, reminders_enabled, reminder_interval_hours, reminder_start_hour, reminder_end_hour]);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Database error' });
     }
 });
 
-// 8. Лидерборд
-app.get('/api/leaderboard', async (req, res) => {
-    const exerciseType = req.query.exercise_type || 'pushups';
-    try {
-        const result = await pool.query(`
-            SELECT user_id, SUM(count) as total
-            FROM exercises
-            WHERE exercise_type = $1 AND created_at >= CURRENT_DATE
-            GROUP BY user_id
-            ORDER BY total DESC
-            LIMIT 10
-        `, [exerciseType]);
-        res.json({ success: true, leaders: result.rows });
-    } catch (err) {
-        res.status(500).json({ error: 'Database error' });
-    }
-});
-
-// 18. Экспорт данных в CSV
-app.get('/api/export-csv', async (req, res) => {
-    const userId = req.query.user_id;
-    try {
-        const result = await pool.query(
-            'SELECT created_at, exercise_type, count, note, rpe FROM exercises WHERE user_id = $1 ORDER BY created_at DESC',
-            [userId]
-        );
-        let csv = 'Date,Exercise,Count,Note,RPE\n';
-        result.rows.forEach(r => {
-            csv += `"${r.created_at.toISOString()}","${r.exercise_type}",${r.count},"${r.note || ''}",${r.rpe || 0}\n`;
-        });
-        res.setHeader('Content-Type', 'text/csv');
-        res.setHeader('Content-Disposition', 'attachment; filename=fitness_export.csv');
-        res.send(csv);
-    } catch (err) {
-        res.status(500).send('Export error');
-    }
-});
-
-// Вспомогательные календарь и статистика
+// 4. Календарь за весь год (по дням)
 app.get('/api/calendar-year', async (req, res) => {
     const userId = req.query.user_id;
     const year = req.query.year || new Date().getFullYear();
-    const exerciseType = req.query.exercise_type || 'pushups';
 
     try {
         const result = await pool.query(`
             SELECT TO_CHAR(created_at, 'YYYY-MM-DD') as date, SUM(count) as total, COUNT(id) as sets_count
-            FROM exercises
-            WHERE user_id = $1 AND exercise_type = $3 AND EXTRACT(YEAR FROM created_at) = $2
+            FROM pushups
+            WHERE user_id = $1 AND EXTRACT(YEAR FROM created_at) = $2
             GROUP BY TO_CHAR(created_at, 'YYYY-MM-DD')
-        `, [userId, year, exerciseType]);
+        `, [userId, year]);
 
         const map = {};
         result.rows.forEach(r => { map[r.date] = { total: parseInt(r.total), sets: parseInt(r.sets_count) }; });
@@ -382,33 +176,37 @@ app.get('/api/calendar-year', async (req, res) => {
     }
 });
 
+// 5. Данные для аналитики и графиков
 app.get('/api/stats-charts', async (req, res) => {
     const userId = req.query.user_id;
-    const exerciseType = req.query.exercise_type || 'pushups';
     try {
         const weeklyRes = await pool.query(`
             SELECT TO_CHAR(created_at, 'DD.MM') as day_label, SUM(count) as total
-            FROM exercises
-            WHERE user_id = $1 AND exercise_type = $2 AND created_at >= NOW() - INTERVAL '7 days'
+            FROM pushups
+            WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '7 days'
             GROUP BY DATE(created_at), TO_CHAR(created_at, 'DD.MM')
             ORDER BY DATE(created_at) ASC
-        `, [userId, exerciseType]);
+        `, [userId]);
 
         const monthlyRes = await pool.query(`
             SELECT TO_CHAR(created_at, 'DD.MM') as day_label, SUM(count) as total
-            FROM exercises
-            WHERE user_id = $1 AND exercise_type = $2 AND created_at >= NOW() - INTERVAL '30 days'
+            FROM pushups
+            WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '30 days'
             GROUP BY DATE(created_at), TO_CHAR(created_at, 'DD.MM')
             ORDER BY DATE(created_at) ASC
-        `, [userId, exerciseType]);
+        `, [userId]);
 
-        res.json({ success: true, weekly: weeklyRes.rows, monthly: monthlyRes.rows });
+        res.json({
+            success: true,
+            weekly: weeklyRes.rows,
+            monthly: monthlyRes.rows
+        });
     } catch (err) {
         res.status(500).json({ error: 'Database error' });
     }
 });
 
-// --- ВЕБ-ИНТЕРФЕЙС (19. Поддержка системных тем Telegram) ---
+// --- ВЕБ-ИНТЕРФЕЙС ---
 app.get('*', (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -416,59 +214,56 @@ app.get('*', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>iOS Fitness Tracker Pro</title>
+    <title>iOS Fitness Tracker</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
-            --ios-bg: var(--tg-theme-bg-color, #000000);
-            --glass-bg: rgba(255, 255, 255, 0.08);
+            --ios-bg: #000000;
+            --glass-bg: rgba(255, 255, 255, 0.07);
             --glass-border: rgba(255, 255, 255, 0.12);
             --accent-green: #30d158;
             --accent-blue: #0a84ff;
             --accent-orange: #ff9f0a;
-            --accent-red: #ff453a;
-            --text-primary: var(--tg-theme-text-color, #ffffff);
+            --text-primary: #ffffff;
             --text-secondary: rgba(255, 255, 255, 0.55);
         }
 
-        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Roboto, sans-serif; }
+        * {
+            box-sizing: border-box; margin: 0; padding: 0;
+            user-select: none; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", Roboto, sans-serif;
+        }
 
         body {
             background-color: var(--ios-bg);
-            background-image: radial-gradient(at 0% 0%, rgba(10, 132, 255, 0.15) 0px, transparent 45%),
-                              radial-gradient(at 100% 0%, rgba(48, 209, 88, 0.12) 0px, transparent 45%);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(10, 132, 255, 0.18) 0px, transparent 45%),
+                radial-gradient(at 100% 0%, rgba(48, 209, 88, 0.15) 0px, transparent 45%);
             background-attachment: fixed;
-            color: var(--text-primary); min-height: 100vh;
+            color: var(--text-primary);
+            min-height: 100vh;
             padding: max(16px, env(safe-area-inset-top)) 16px max(95px, env(safe-area-inset-bottom)) 16px;
             display: flex; flex-direction: column; gap: 14px;
         }
 
         .glass-card {
-            background: var(--glass-bg); backdrop-filter: blur(25px) saturate(180%);
+            background: var(--glass-bg);
+            backdrop-filter: blur(25px) saturate(180%);
             -webkit-backdrop-filter: blur(25px) saturate(180%);
-            border: 1px solid var(--glass-border); border-radius: 20px; padding: 16px;
+            border: 1px solid var(--glass-border);
+            border-radius: 20px; padding: 16px;
         }
 
         .header { display: flex; justify-content: space-between; align-items: center; }
         .user-profile { display: flex; align-items: center; gap: 12px; }
         .avatar {
-            width: 42px; height: 42px; border-radius: 50%;
+            width: 40px; height: 40px; border-radius: 50%;
             background: linear-gradient(135deg, var(--accent-blue), var(--accent-green));
-            display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 17px;
         }
         .title-sub { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
         .title-main { font-size: 18px; font-weight: 700; }
-
-        .exercise-selector {
-            display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-top: 6px;
-        }
-        .exercise-chip {
-            background: rgba(255,255,255,0.06); border: 1px solid var(--glass-border);
-            padding: 8px 14px; border-radius: 20px; font-size: 13px; font-weight: 600;
-            white-space: nowrap; cursor: pointer; color: var(--text-secondary);
-        }
-        .exercise-chip.active { background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }
 
         .main-stats { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 8px; }
         .ring-container { position: relative; width: 95px; height: 95px; display: flex; align-items: center; justify-content: center; }
@@ -484,7 +279,7 @@ app.get('*', (req, res) => {
         .stat-value { font-size: 24px; font-weight: 800; line-height: 1; }
         .stat-desc { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
 
-        .presets-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 6px; }
+        .presets-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
         .btn-glass {
             background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.14);
             border-radius: 12px; padding: 12px 0; color: #fff; font-size: 15px; font-weight: 700;
@@ -492,48 +287,71 @@ app.get('*', (req, res) => {
         }
         .btn-glass:active { transform: scale(0.92); background: rgba(255, 255, 255, 0.2); }
 
+        /* Адаптированная строка ввода собственного значения */
         .custom-input-box {
-            display: flex; flex-direction: column; gap: 8px; margin-top: 8px;
+            display: flex; align-items: center; background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--glass-border); border-radius: 16px; padding: 4px 6px 4px 14px;
+            margin-top: 8px; gap: 8px; width: 100%; box-sizing: border-box;
         }
-        .input-row { display: flex; gap: 8px; align-items: center; }
         .input-glass {
-            flex: 1; background: rgba(255, 255, 255, 0.06); border: 1px solid var(--glass-border);
-            border-radius: 12px; color: #fff; font-size: 14px; padding: 10px 12px; outline: none;
+            flex: 1; min-width: 0; background: transparent; border: none; color: #fff; font-size: 15px;
+            font-weight: 600; outline: none; padding: 10px 0;
         }
+        .input-glass::placeholder { color: var(--text-secondary); font-weight: 400; font-size: 14px; }
         .btn-add-action {
             background: linear-gradient(135deg, var(--accent-green), #249d42);
-            border: none; border-radius: 12px; padding: 12px 20px; color: #fff;
+            border: none; border-radius: 12px; padding: 10px 18px; color: #fff;
             font-weight: 700; font-size: 14px; cursor: pointer; flex-shrink: 0;
+            transition: transform 0.1s ease;
         }
+        .btn-add-action:active { transform: scale(0.94); opacity: 0.9; }
 
-        /* 11. Таймер отдыха */
-        .rest-timer-bar {
-            display: none; background: rgba(10, 132, 255, 0.2); border: 1px solid var(--accent-blue);
-            border-radius: 12px; padding: 10px; text-align: center; font-weight: 700; font-size: 14px;
-        }
-
-        .history-list { display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; margin-top: 6px; }
+        .compact-history-card { padding: 12px 14px; }
+        .history-list { display: flex; flex-direction: column; gap: 6px; max-height: 140px; overflow-y: auto; }
         .history-item-compact {
             display: flex; justify-content: space-between; align-items: center;
-            padding: 8px 10px; background: rgba(255, 255, 255, 0.03);
-            border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.05); font-size: 13px;
+            padding: 7px 10px; background: rgba(255, 255, 255, 0.03);
+            border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.05); font-size: 13px;
         }
 
-        /* 7. Награды */
-        .achievements-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
-        .badge { background: rgba(255,255,255,0.04); border: 1px solid var(--glass-border); border-radius: 12px; padding: 10px; text-align: center; opacity: 0.4; }
-        .badge.unlocked { opacity: 1; border-color: var(--accent-orange); background: rgba(255, 159, 10, 0.1); }
+        .calendar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; text-align: center; }
+        .day-name { font-size: 10px; color: var(--text-secondary); font-weight: 600; padding-bottom: 4px; }
+        .day-cell {
+            aspect-ratio: 1; border-radius: 8px; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; font-size: 11px; font-weight: 600;
+            background: rgba(255, 255, 255, 0.03); border: 1px solid transparent; cursor: pointer; position: relative;
+        }
+        .day-cell.empty { background: transparent; cursor: default; }
+        .day-cell.has-data { background: rgba(48, 209, 88, 0.15); border-color: rgba(48, 209, 88, 0.4); color: var(--accent-green); }
+        .day-cell.completed { background: rgba(48, 209, 88, 0.35); border-color: var(--accent-green); color: #fff; }
+        .day-cell.today { border-color: var(--accent-blue); }
 
         .tab-bar {
             position: fixed; bottom: 0; left: 0; right: 0;
-            background: rgba(18, 18, 18, 0.9); backdrop-filter: blur(25px);
+            background: rgba(18, 18, 18, 0.88); backdrop-filter: blur(25px);
             border-top: 1px solid var(--glass-border); display: flex; justify-content: space-around;
             padding-top: 8px; padding-bottom: max(10px, env(safe-area-inset-bottom)); z-index: 1000;
         }
-        .tab-btn { background: none; border: none; color: var(--text-secondary); font-size: 10px; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+        .tab-btn {
+            background: none; border: none; color: var(--text-secondary);
+            font-size: 10px; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer;
+        }
         .tab-btn.active { color: var(--accent-blue); font-weight: 700; }
+
         .tab-content { display: none; }
         .tab-content.active { display: flex; flex-direction: column; gap: 14px; }
+
+        .settings-group { display: flex; flex-direction: column; gap: 12px; }
+        .setting-card-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 14px 16px; background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--glass-border); border-radius: 14px; gap: 12px;
+        }
+        .select-glass {
+            background: rgba(255, 255, 255, 0.1); border: 1px solid var(--glass-border);
+            color: #fff; padding: 6px 10px; border-radius: 8px; outline: none; font-size: 13px;
+        }
     </style>
 </head>
 <body>
@@ -544,23 +362,14 @@ app.get('*', (req, res) => {
             <div class="user-profile">
                 <div class="avatar" id="userAvatar">U</div>
                 <div>
-                    <div class="title-sub" id="streakBadge">🔥 0 дней подряд</div>
-                    <div class="title-main" id="userName">Спортсмен</div>
+                    <div class="title-sub">iOS Fitness Tracker</div>
+                    <div class="title-main" id="userName">Пользователь</div>
                 </div>
             </div>
-            <button class="btn-glass" style="padding:6px 12px; font-size:12px;" onclick="exportCSV()">📥 CSV</button>
-        </div>
-
-        <!-- 12. Мульти-упражнения -->
-        <div class="exercise-selector">
-            <div class="exercise-chip active" onclick="setExercise('pushups', this)">💪 Отжимания</div>
-            <div class="exercise-chip" onclick="setExercise('squats', this)">🦵 Приседания</div>
-            <div class="exercise-chip" onclick="setExercise('pullups', this)">🏋️ Подтягивания</div>
-            <div class="exercise-chip" onclick="setExercise('plank', this)">⏱️ Планка (сек)</div>
         </div>
 
         <div class="glass-card">
-            <div class="title-sub">Прогресс дня</div>
+            <div class="title-sub">Дневной прогресс</div>
             <div class="main-stats">
                 <div class="ring-container">
                     <svg class="ring-svg" viewBox="0 0 100 100">
@@ -581,106 +390,152 @@ app.get('*', (req, res) => {
                 <div style="flex:1; display:flex; flex-direction:column; gap:8px;">
                     <div>
                         <div class="stat-value" id="todayCount">0 <span style="font-size:13px; color:var(--text-secondary);">/ <span id="goalCount">100</span></span></div>
-                        <div class="stat-desc">Выполнено сегодня</div>
+                        <div class="stat-desc">Отжиманий сегодня</div>
                     </div>
                     <div>
                         <div class="stat-value" id="setsCount" style="color:var(--accent-blue);">0</div>
-                        <div class="stat-desc">Всего подходов</div>
+                        <div class="stat-desc">Выполнено подходов</div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- 11. Таймер отдыха -->
-        <div id="restTimer" class="rest-timer-bar">
-            ⏱ Отдых: <span id="timerSeconds">60</span> сек
-        </div>
-
-        <!-- Быстрый ввод -->
         <div>
-            <div class="title-sub">Быстрый набор</div>
-            <div class="presets-grid" id="presetsGrid"></div>
+            <div class="title-sub" style="margin-left: 4px; margin-bottom: 6px;">Быстрый ввод</div>
+            <div class="presets-grid">
+                <button class="btn-glass" onclick="addPushups(15)">+15</button>
+                <button class="btn-glass" onclick="addPushups(20)">+20</button>
+                <button class="btn-glass" onclick="addPushups(25)">+25</button>
+                <button class="btn-glass" onclick="addPushups(30)">+30</button>
+                <button class="btn-glass" onclick="addPushups(35)">+35</button>
+            </div>
 
             <div class="custom-input-box">
-                <div class="input-row">
-                    <input type="number" id="customInput" class="input-glass" placeholder="Количество..." min="1">
-                    <!-- 15. RPE Оценка сложности -->
-                    <select id="rpeInput" class="input-glass" style="max-width:110px;">
-                        <option value="0">RPE (1-10)</option>
-                        <option value="6">6 - Легко</option>
-                        <option value="8">8 - Норм</option>
-                        <option value="10">10 - Макс</option>
-                    </select>
-                </div>
-                <!-- 14. Заметка к подходу -->
-                <div class="input-row">
-                    <input type="text" id="noteInput" class="input-glass" placeholder="Заметка (напр. узкий хват)...">
-                    <button class="btn-add-action" onclick="addCustom()">Записать</button>
-                </div>
+                <input type="number" id="customInput" class="input-glass" placeholder="Введите своё число..." min="1">
+                <button class="btn-add-action" onclick="addCustom()">Записать</button>
             </div>
         </div>
 
-        <!-- Сегодняшняя история с поддержкой удаления (3) -->
-        <div class="glass-card">
-            <div class="title-sub">Сегодняшние подходы</div>
+        <div class="glass-card compact-history-card">
+            <div class="title-sub" style="margin-bottom: 8px;">Сегодняшние подходы</div>
             <div class="history-list" id="historyList"></div>
         </div>
-
-        <!-- 20. Генератор карточки результатов -->
-        <button class="btn-glass" style="width:100%; border-color:var(--accent-blue);" onclick="shareResultCard()">📸 Поделиться результатом в Story</button>
     </div>
 
-    <!-- Вкладка 2: Прогресс и Лидерборд -->
-    <div id="tab-progress" class="tab-content">
-        <!-- 8. Лидерборд -->
+    <!-- Вкладка 2: Календарь на год -->
+    <div id="tab-calendar" class="tab-content">
         <div class="glass-card">
-            <div class="title-sub">🏆 Лидеры дня</div>
-            <div id="leaderboardList" style="display:flex; flex-direction:column; gap:6px; margin-top:8px;"></div>
+            <div class="calendar-header">
+                <button class="btn-glass" style="padding:4px 12px; font-size:12px;" onclick="changeMonth(-1)">◀</button>
+                <div style="text-align:center;">
+                    <div class="title-main" id="calendarMonthYear" style="font-size:16px;">Сентябрь 2026</div>
+                </div>
+                <button class="btn-glass" style="padding:4px 12px; font-size:12px;" onclick="changeMonth(1)">▶</button>
+            </div>
+
+            <div class="calendar-grid">
+                <div class="day-name">Пн</div><div class="day-name">Вт</div><div class="day-name">Ср</div>
+                <div class="day-name">Чт</div><div class="day-name">Пт</div><div class="day-name">Сб</div><div class="day-name">Вс</div>
+            </div>
+            <div class="calendar-grid" id="calendarGrid" style="margin-top:4px;"></div>
         </div>
 
+        <div class="glass-card" id="dayDetailCard" style="display:none;">
+            <div class="title-sub" id="selectedDateTitle">Информация за день</div>
+            <div class="stat-value" id="selectedDateCount" style="color:var(--accent-green); margin-top:4px;">0 отжиманий</div>
+            <div class="stat-desc" id="selectedDateSets">Подходов: 0</div>
+        </div>
+    </div>
+
+    <!-- Вкладка 3: Графики и аналитика -->
+    <div id="tab-progress" class="tab-content">
         <div class="glass-card">
             <div class="title-sub">Активность за 7 дней</div>
-            <div style="height: 150px; margin-top: 10px;"><canvas id="weeklyChart"></canvas></div>
+            <div style="height: 160px; margin-top: 10px;">
+                <canvas id="weeklyChart"></canvas>
+            </div>
         </div>
 
-        <!-- 7. Достижения -->
         <div class="glass-card">
-            <div class="title-sub">Награды</div>
-            <div class="achievements-grid">
-                <div class="badge" id="badge_1000_rep_club">🏆<br><span style="font-size:10px;">1,000 Повторов</span></div>
-                <div class="badge" id="badge_7_streak">🔥<br><span style="font-size:10px;">7 дней подряд</span></div>
-                <div class="badge" id="badge_first_step">⭐<br><span style="font-size:10px;">Первый шаг</span></div>
+            <div class="title-sub">Динамика за 30 дней</div>
+            <div style="height: 160px; margin-top: 10px;">
+                <canvas id="monthlyChart"></canvas>
             </div>
         </div>
     </div>
 
-    <!-- Вкладка 3: Настройки -->
+    <!-- Вкладка 4: Настройки -->
     <div id="tab-settings" class="tab-content">
         <div class="glass-card">
-            <div class="title-sub" style="margin-bottom: 12px;">Параметры</div>
-            <div style="display:flex; flex-direction:column; gap:10px;">
-                <div>
-                    <label class="title-sub">Дневная цель</label>
-                    <input type="number" id="settingGoal" class="input-glass" style="width:100%; margin-top:4px;" value="100">
+            <div class="title-sub" style="margin-bottom: 14px;">Параметры тренировок</div>
+            
+            <div class="settings-group">
+                <div class="setting-card-item">
+                    <div>
+                        <div style="font-weight:600; font-size:15px;">Дневная цель</div>
+                        <div style="font-size:12px; color:var(--text-secondary);">Количество отжиманий</div>
+                    </div>
+                    <input type="number" id="settingGoal" class="input-glass" style="width:70px; text-align:center; background:rgba(255,255,255,0.08); border-radius:8px; padding:6px;" value="100">
                 </div>
-                <div>
-                    <label class="title-sub">Часовой пояс (Timezone)</label>
-                    <input type="text" id="settingTimezone" class="input-glass" style="width:100%; margin-top:4px;" value="UTC">
+
+                <div class="setting-card-item">
+                    <div>
+                        <div style="font-weight:600; font-size:15px;">Напоминания в Telegram</div>
+                        <div style="font-size:12px; color:var(--text-secondary);">Пуши от бота при паузе</div>
+                    </div>
+                    <input type="checkbox" id="settingReminders" checked style="width: 22px; height: 22px; accent-color: var(--accent-green);">
                 </div>
-                <div>
-                    <label class="title-sub">Пресеты (через запятую)</label>
-                    <input type="text" id="settingPresets" class="input-glass" style="width:100%; margin-top:4px;" value="15,20,25,30,35">
+
+                <div class="setting-card-item">
+                    <div>
+                        <div style="font-weight:600; font-size:15px;">Интервал уведомлений</div>
+                        <div style="font-size:12px; color:var(--text-secondary);">Частота отправки</div>
+                    </div>
+                    <select id="settingInterval" class="select-glass">
+                        <option value="1">Каждый 1 час</option>
+                        <option value="2">Каждые 2 часа</option>
+                        <option value="3" selected>Каждые 3 часа</option>
+                        <option value="4">Каждые 4 часа</option>
+                        <option value="6">Каждые 6 часов</option>
+                    </select>
                 </div>
-                <button class="btn-add-action" style="margin-top:8px;" onclick="saveSettings()">Сохранить настройки</button>
+
+                <!-- Диапазон времени работы пушей -->
+                <div class="setting-card-item">
+                    <div>
+                        <div style="font-weight:600; font-size:15px;">Диапазон времени</div>
+                        <div style="font-size:12px; color:var(--text-secondary);">Часы активности бота</div>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:6px;">
+                        <select id="settingStartHour" class="select-glass"></select>
+                        <span style="font-size:12px; color:var(--text-secondary);">—</span>
+                        <select id="settingEndHour" class="select-glass"></select>
+                    </div>
+                </div>
+
+                <button class="btn-add-action" style="width:100%; padding:14px; margin-top:6px;" onclick="saveSettings()">Сохранить настройки</button>
             </div>
         </div>
     </div>
 
     <!-- Таббар -->
     <div class="tab-bar">
-        <button class="tab-btn active" onclick="switchTab('home', this)">📊<span>Трекер</span></button>
-        <button class="tab-btn" onclick="switchTab('progress', this)">📈<span>Прогресс</span></button>
-        <button class="tab-btn" onclick="switchTab('settings', this)">⚙️<span>Настройки</span></button>
+        <button class="tab-btn active" onclick="switchTab('home', this)">
+            <span style="font-size:16px;">📊</span>
+            <span>Главная</span>
+        </button>
+        <button class="tab-btn" onclick="switchTab('calendar', this)">
+            <span style="font-size:16px;">📅</span>
+            <span>Календарь</span>
+        </button>
+        <button class="tab-btn" onclick="switchTab('progress', this)">
+            <span style="font-size:16px;">📈</span>
+            <span>Прогресс</span>
+        </button>
+        <button class="tab-btn" onclick="switchTab('settings', this)">
+            <span style="font-size:16px;">⚙️</span>
+            <span>Настройки</span>
+        </button>
     </div>
 
     <script>
@@ -689,230 +544,253 @@ app.get('*', (req, res) => {
 
         const user = tg.initDataUnsafe?.user;
         const userId = user ? user.id : 999999;
-        let currentExercise = 'pushups';
-        let userGoal = 100;
-        let restTimerInterval;
 
         if (user) {
             document.getElementById('userName').innerText = user.first_name || 'Спортсмен';
             document.getElementById('userAvatar').innerText = (user.first_name || 'U')[0].toUpperCase();
         }
 
-        // 10. Тактильный отклик (Haptics)
-        function triggerHaptic(style = 'medium') {
-            if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred(style);
+        let userGoal = 100;
+        let currentDate = new Date();
+        let yearDataMap = {};
+        let weeklyChartInstance, monthlyChartInstance;
+
+        // Заполнение селектов времени (00:00 - 23:00)
+        function initTimeSelects() {
+            const startSelect = document.getElementById('settingStartHour');
+            const endSelect = document.getElementById('settingEndHour');
+            startSelect.innerHTML = '';
+            endSelect.innerHTML = '';
+
+            for (let i = 0; i < 24; i++) {
+                const hourStr = String(i).padStart(2, '0') + ':00';
+                startSelect.innerHTML += \`<option value="\${i}">\${hourStr}</option>\`;
+                endSelect.innerHTML += \`<option value="\${i}">\${hourStr}</option>\`;
+            }
+        }
+        initTimeSelects();
+
+        function triggerHaptic() {
+            if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
         }
 
         function switchTab(tabName, btn) {
-            triggerHaptic('light');
+            triggerHaptic();
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+
             document.getElementById('tab-' + tabName).classList.add('active');
             btn.classList.add('active');
-            if (tabName === 'progress') { loadCharts(); loadLeaderboard(); }
-        }
 
-        function setExercise(type, el) {
-            triggerHaptic('light');
-            currentExercise = type;
-            document.querySelectorAll('.exercise-chip').forEach(c => c.classList.remove('active'));
-            el.classList.add('active');
-            loadUserData();
+            if (tabName === 'calendar') loadYearCalendar();
+            if (tabName === 'progress') loadCharts();
         }
-
-        // 5. Офлайн режим (LocalStorage fallback)
-        async function apiFetch(url, options = {}) {
-            try {
-                const res = await fetch(url, options);
-                return await res.json();
-            } catch (e) {
-                if (options.method === 'POST' && url.includes('/api/add')) {
-                    const queue = JSON.parse(localStorage.getItem('offline_add_queue') || '[]');
-                    queue.push(JSON.parse(options.body));
-                    localStorage.setItem('offline_add_queue', JSON.stringify(queue));
-                    alert('Сеть недоступна. Подход сохранен локально и будет отправлен позже!');
-                }
-                return { success: false, offline: true };
-            }
-        }
-
-        // Синхронизация офлайн подходов при появлении сети
-        window.addEventListener('online', async () => {
-            const queue = JSON.parse(localStorage.getItem('offline_add_queue') || '[]');
-            if (queue.length > 0) {
-                for (const item of queue) {
-                    await fetch('/api/add', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(item)
-                    });
-                }
-                localStorage.removeItem('offline_add_queue');
-                loadUserData();
-            }
-        });
 
         async function loadUserData() {
-            const data = await apiFetch(\`/api/user-data?user_id=\${userId}&exercise_type=\${currentExercise}\`);
-            if (data.success) {
-                userGoal = data.settings.goal || 100;
-                document.getElementById('goalCount').innerText = userGoal;
-                document.getElementById('settingGoal').value = userGoal;
-                document.getElementById('settingTimezone').value = data.settings.timezone || 'UTC';
-                document.getElementById('streakBadge').innerText = \`🔥 \${data.streak} дней подряд\`;
+            try {
+                const res = await fetch(\`/api/user-data?user_id=\${userId}\`);
+                const data = await res.json();
 
-                // Пресеты (13)
-                const presets = data.settings.presets || [15, 20, 25, 30, 35];
-                document.getElementById('settingPresets').value = presets.join(',');
-                const presetsGrid = document.getElementById('presetsGrid');
-                presetsGrid.innerHTML = '';
-                presets.forEach(val => {
-                    presetsGrid.innerHTML += \`<button class="btn-glass" onclick="addExercise(\${val})">+\${val}</button>\`;
-                });
+                if (data.success) {
+                    userGoal = data.settings.goal || 100;
+                    document.getElementById('goalCount').innerText = userGoal;
+                    document.getElementById('settingGoal').value = userGoal;
+                    document.getElementById('settingReminders').checked = data.settings.reminders_enabled;
+                    document.getElementById('settingInterval').value = data.settings.reminder_interval_hours || 3;
+                    document.getElementById('settingStartHour').value = data.settings.reminder_start_hour ?? 10;
+                    document.getElementById('settingEndHour').value = data.settings.reminder_end_hour ?? 23;
 
-                let todayTotal = 0;
-                const historyList = document.getElementById('historyList');
-                historyList.innerHTML = '';
-                document.getElementById('setsCount').innerText = data.todayHistory.length;
+                    let todayTotal = 0;
+                    const historyList = document.getElementById('historyList');
+                    historyList.innerHTML = '';
 
-                data.todayHistory.forEach(row => {
-                    todayTotal += row.count;
-                    const timeStr = new Date(row.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                    historyList.innerHTML += \`
-                        <div class="history-item-compact">
-                            <div>
-                                <span style="font-weight:700; color:var(--accent-green);">+\${row.count}</span>
-                                \${row.note ? \`<span style="color:var(--text-secondary); font-size:11px;"> (\${row.note})</span>\` : ''}
-                            </div>
-                            <div style="display:flex; align-items:center; gap:8px;">
-                                <span style="color:var(--text-secondary); font-size:11px;">\${timeStr}</span>
-                                <span style="color:var(--accent-red); cursor:pointer;" onclick="deleteSet(\${row.id})">🗑</span>
-                            </div>
-                        </div>\`;
-                });
+                    document.getElementById('setsCount').innerText = data.todayHistory.length;
 
-                document.getElementById('todayCount').innerHTML = \`\${todayTotal} <span style="font-size:13px; color:var(--text-secondary);">/ \${userGoal}</span>\`;
-                const percent = Math.min(Math.round((todayTotal / userGoal) * 100), 100);
-                document.getElementById('percentText').innerText = \`\${percent}%\`;
-                document.getElementById('progressRing').style.strokeDashoffset = 283 - (percent / 100) * 283;
+                    if (data.todayHistory.length === 0) {
+                        historyList.innerHTML = '<div style="text-align:center; color:var(--text-secondary); font-size:12px; padding:6px;">Подходов пока нет</div>';
+                    } else {
+                        data.todayHistory.forEach(row => {
+                            todayTotal += row.count;
+                            const timeStr = new Date(row.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                            historyList.innerHTML += \`
+                                <div class="history-item-compact">
+                                    <span style="font-weight:700; color:var(--accent-green);">+\${row.count}</span>
+                                    <span style="color:var(--text-secondary); font-size:11px;">\${timeStr}</span>
+                                </div>\`;
+                        });
+                    }
 
-                // Отображение ачивок
-                (data.achievements || []).forEach(key => {
-                    const el = document.getElementById('badge_' + key);
-                    if (el) el.classList.add('unlocked');
-                });
-            }
+                    document.getElementById('todayCount').innerHTML = \`\${todayTotal} <span style="font-size:13px; color:var(--text-secondary);">/ \${userGoal}</span>\`;
+                    const percent = Math.min(Math.round((todayTotal / userGoal) * 100), 100);
+                    document.getElementById('percentText').innerText = \`\${percent}%\`;
+
+                    const circle = document.getElementById('progressRing');
+                    circle.style.strokeDashoffset = 283 - (percent / 100) * 283;
+                }
+            } catch (err) { console.error(err); }
         }
 
-        async function addExercise(count) {
-            triggerHaptic('medium');
-            const note = document.getElementById('noteInput').value;
-            const rpe = parseInt(document.getElementById('rpeInput').value) || 0;
-
-            await apiFetch('/api/add', {
+        async function addPushups(count) {
+            triggerHaptic();
+            await fetch('/api/add', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    user_id: userId, count: count, exercise_type: currentExercise,
-                    note: note, rpe: rpe, initData: tg.initData
-                })
+                body: JSON.stringify({ user_id: userId, count: count })
             });
-
-            document.getElementById('customInput').value = '';
-            document.getElementById('noteInput').value = '';
-            startRestTimer(60); // 11. Запуск таймера отдыха на 60 сек
             loadUserData();
         }
 
         function addCustom() {
             const val = parseInt(document.getElementById('customInput').value);
-            if (val > 0) addExercise(val);
-        }
-
-        // 3. Удаление подхода
-        async function deleteSet(id) {
-            triggerHaptic('heavy');
-            await apiFetch('/api/delete-set/' + id, {
-                method: 'DELETE',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId })
-            });
-            loadUserData();
-        }
-
-        // 11. Логика таймера отдыха
-        function startRestTimer(seconds) {
-            clearInterval(restTimerInterval);
-            const timerEl = document.getElementById('restTimer');
-            const secEl = document.getElementById('timerSeconds');
-            timerEl.style.display = 'block';
-            let left = seconds;
-            secEl.innerText = left;
-
-            restTimerInterval = setInterval(() => {
-                left--;
-                secEl.innerText = left;
-                if (left <= 0) {
-                    clearInterval(restTimerInterval);
-                    timerEl.style.display = 'none';
-                    triggerHaptic('heavy');
-                }
-            }, 1000);
-        }
-
-        // 8. Загрузка Лидерборда
-        async function loadLeaderboard() {
-            const data = await apiFetch(\`/api/leaderboard?exercise_type=\${currentExercise}\`);
-            const list = document.getElementById('leaderboardList');
-            list.innerHTML = '';
-            if (data.success) {
-                data.leaders.forEach((item, index) => {
-                    list.innerHTML += \`
-                        <div class="history-item-compact">
-                            <span>#\${index + 1} Атлет ID: \${item.user_id}</span>
-                            <span style="font-weight:700; color:var(--accent-blue);">\${item.total}</span>
-                        </div>\`;
-                });
+            if (val > 0) {
+                addPushups(val);
+                document.getElementById('customInput').value = '';
             }
         }
 
         async function saveSettings() {
-            triggerHaptic('medium');
+            triggerHaptic();
             const goal = parseInt(document.getElementById('settingGoal').value);
-            const tz = document.getElementById('settingTimezone').value;
-            const presets = document.getElementById('settingPresets').value.split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n));
+            const reminders = document.getElementById('settingReminders').checked;
+            const interval = parseInt(document.getElementById('settingInterval').value);
+            const startHour = parseInt(document.getElementById('settingStartHour').value);
+            const endHour = parseInt(document.getElementById('settingEndHour').value);
 
-            await apiFetch('/api/settings', {
+            await fetch('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, goal: goal, timezone: tz, presets: presets })
+                body: JSON.stringify({
+                    user_id: userId,
+                    goal: goal,
+                    reminders_enabled: reminders,
+                    reminder_interval_hours: interval,
+                    reminder_start_hour: startHour,
+                    reminder_end_hour: endHour
+                })
             });
-            alert('Настройки сохранены!');
+            alert('Настройки успешно сохранены!');
             loadUserData();
         }
 
-        // 18. Экспорт CSV
-        function exportCSV() {
-            window.location.href = \`/api/export-csv?user_id=\${userId}\`;
+        // --- Календарь ---
+        async function loadYearCalendar() {
+            const year = currentDate.getFullYear();
+            const res = await fetch(\`/api/calendar-year?user_id=\${userId}&year=\${year}\`);
+            const data = await res.json();
+            if (data.success) {
+                yearDataMap = data.calendarMap;
+                renderCalendar();
+            }
         }
 
-        // 20. Генерация карточки результатов для отправки в Telegram
-        function shareResultCard() {
-            const text = encodeURIComponent(\`💪 Мой результат сегодня: \${document.getElementById('todayCount').innerText} в трекере!\`);
-            tg.openTelegramLink(\`https://t.me/share/url?url=\${process.env.WEBAPP_URL || 'https://sport-ya.onrender.com'}&text=\${text}\`);
+        function changeMonth(delta) {
+            currentDate.setMonth(currentDate.getMonth() + delta);
+            renderCalendar();
         }
 
+        function renderCalendar() {
+            const monthNames = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+            const year = currentDate.getFullYear();
+            const month = currentDate.getMonth();
+
+            document.getElementById('calendarMonthYear').innerText = \`\${monthNames[month]} \${year}\`;
+
+            const firstDay = new Date(year, month, 1).getDay();
+            const startingDay = firstDay === 0 ? 6 : firstDay - 1;
+            const totalDays = new Date(year, month + 1, 0).getDate();
+
+            const grid = document.getElementById('calendarGrid');
+            grid.innerHTML = '';
+
+            for (let i = 0; i < startingDay; i++) {
+                grid.innerHTML += '<div class="day-cell empty"></div>';
+            }
+
+            const todayStr = new Date().toISOString().split('T')[0];
+
+            for (let day = 1; day <= totalDays; day++) {
+                const dayFormatted = String(day).padStart(2, '0');
+                const monthFormatted = String(month + 1).padStart(2, '0');
+                const dateKey = \`\${year}-\${monthFormatted}-\${dayFormatted}\`;
+
+                const dayData = yearDataMap[dateKey];
+                let classes = 'day-cell';
+                if (dateKey === todayStr) classes += ' today';
+                if (dayData) {
+                    classes += dayData.total >= userGoal ? ' completed' : ' has-data';
+                }
+
+                grid.innerHTML += \`
+                    <div class="\${classes}" onclick="selectCalendarDay('\${dateKey}', \${dayData ? dayData.total : 0}, \${dayData ? dayData.sets : 0})">
+                        <span>\${day}</span>
+                    </div>\`;
+            }
+        }
+
+        function selectCalendarDay(dateStr, total, sets) {
+            triggerHaptic();
+            const card = document.getElementById('dayDetailCard');
+            card.style.display = 'block';
+            document.getElementById('selectedDateTitle').innerText = \`Дата: \${dateStr}\`;
+            document.getElementById('selectedDateCount').innerText = \`\${total} отжиманий\`;
+            document.getElementById('selectedDateSets').innerText = \`Выполнено подходов: \${sets}\`;
+        }
+
+        // --- Графики ---
         async function loadCharts() {
-            const data = await apiFetch(\`/api/stats-charts?user_id=\${userId}&exercise_type=\${currentExercise}\`);
+            const res = await fetch(\`/api/stats-charts?user_id=\${userId}\`);
+            const data = await res.json();
+
             if (!data.success) return;
 
-            new Chart(document.getElementById('weeklyChart'), {
+            const wLabels = data.weekly.map(i => i.day_label);
+            const wTotals = data.weekly.map(i => i.total);
+
+            if (weeklyChartInstance) weeklyChartInstance.destroy();
+            weeklyChartInstance = new Chart(document.getElementById('weeklyChart'), {
                 type: 'bar',
                 data: {
-                    labels: data.weekly.map(i => i.day_label),
-                    datasets: [{ data: data.weekly.map(i => i.total), backgroundColor: '#30d158', borderRadius: 6 }]
+                    labels: wLabels,
+                    datasets: [{
+                        data: wTotals,
+                        backgroundColor: '#30d158',
+                        borderRadius: 6
+                    }]
                 },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: 'rgba(255,255,255,0.5)' } },
+                        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: 'rgba(255,255,255,0.5)' } }
+                    }
+                }
+            });
+
+            const mLabels = data.monthly.map(i => i.day_label);
+            const mTotals = data.monthly.map(i => i.total);
+
+            if (monthlyChartInstance) monthlyChartInstance.destroy();
+            monthlyChartInstance = new Chart(document.getElementById('monthlyChart'), {
+                type: 'line',
+                data: {
+                    labels: mLabels,
+                    datasets: [{
+                        data: mTotals,
+                        borderColor: '#0a84ff',
+                        backgroundColor: 'rgba(10, 132, 255, 0.15)',
+                        fill: true,
+                        tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: 'rgba(255,255,255,0.5)' } },
+                        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: 'rgba(255,255,255,0.5)' } }
+                    }
+                }
             });
         }
 
