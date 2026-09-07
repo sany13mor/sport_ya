@@ -336,6 +336,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             padding: 16px;
             margin-bottom: 14px;
             box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+            overflow: hidden;
         }
 
         .card-header-title {
@@ -465,27 +466,31 @@ const HTML_PAGE = `<!DOCTYPE html>
 
         .input-row {
             display: flex;
-            gap: 10px;
+            gap: 8px;
+            width: 100%;
+            align-items: center;
         }
         .custom-input {
-            flex-grow: 1;
+            flex: 1;
+            min-width: 0;
             background: var(--input-bg);
             border: 1px solid var(--card-border);
             border-radius: 12px;
-            padding: 12px 14px;
+            padding: 12px 10px;
             color: #fff;
-            font-size: 15px;
+            font-size: 14px;
             outline: none;
         }
         .custom-input::placeholder { color: var(--text-muted); }
 
         .btn-green {
+            flex-shrink: 0;
             background: var(--accent-green);
             color: #fff;
             border: none;
             border-radius: 12px;
-            padding: 12px 20px;
-            font-size: 15px;
+            padding: 12px 16px;
+            font-size: 14px;
             font-weight: 700;
             cursor: pointer;
             transition: background 0.15s ease, transform 0.1s ease;
@@ -946,7 +951,13 @@ const HTML_PAGE = `<!DOCTYPE html>
     }
 
     function triggerHaptic() {
-        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+        try {
+            if (window.Telegram?.WebApp?.HapticFeedback) {
+                window.Telegram.WebApp.HapticFeedback.impactOccurred('light');
+            }
+        } catch (e) {
+            console.warn('Haptic not supported:', e);
+        }
     }
 
     // Загрузка данных при старте
@@ -1016,8 +1027,12 @@ const HTML_PAGE = `<!DOCTYPE html>
             }
         });
 
-        if (tabName === 'calendar') renderCalendar();
-        if (tabName === 'progress') renderProgressChart();
+        try {
+            if (tabName === 'calendar') renderCalendar();
+            if (tabName === 'progress') renderProgressChart();
+        } catch (err) {
+            console.error('Tab render error:', err);
+        }
     }
 
     function getTodaySets() {
