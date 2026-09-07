@@ -1,7 +1,7 @@
 {
   "name": "sport-ya-bot",
-  "version": "2.0.0",
-  "description": "Multi-exercise Telegram Tracker WebApp",
+  "version": "2.1.0",
+  "description": "Full Hybrid Telegram Fitness WebApp",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
