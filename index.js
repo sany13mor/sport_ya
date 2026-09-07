@@ -36,6 +36,138 @@ function sendTelegramMessage(chatId, text, replyMarkup) {
     req.end();
 }
 
+// ---------------- API ДЛЯ РАБОТЫ С SUPABASE ----------------
+
+// 1. Получение всех данных пользователя (профиль, настройки, отжимания за сегодня)
+app.get('/api/user-data', async (req, res) => {
+    const telegramId = req.query.telegram_id;
+    if (!telegramId || !supabase) {
+        return res.json({ status: 'error', message: 'No telegram_id or Supabase connection' });
+    }
+
+    try {
+        // Настройки и профиль
+        let { data: userSettings } = await supabase
+            .from('user_settings')
+            .select('*')
+            .eq('telegram_id', String(telegramId))
+            .single();
+
+        // Записи отжиманий за сегодня (МСК / UTC)
+        const startOfDay = new Date();
+        startOfDay.setUTCHours(0,0,0,0);
+
+        let { data: pushups } = await supabase
+            .from('pushups')
+            .select('*')
+            .eq('telegram_id', String(telegramId))
+            .gte('created_at', startOfDay.toISOString())
+            .order('created_at', { ascending: false });
+
+        res.json({
+            status: 'ok',
+            settings: userSettings || { weight: 80, height: 180, daily_goal: 100 },
+            pushups: pushups || []
+        });
+    } catch (e) {
+        console.error('Error fetching user data:', e);
+        res.status(500).json({ status: 'error', message: e.message });
+    }
+});
+
+// 2. Сохранение параметров профиля (Вес и Рост)
+app.post('/api/save-profile', async (req, res) => {
+    const { telegram_id, weight, height } = req.body;
+    if (!telegram_id || !supabase) {
+        return res.status(400).json({ status: 'error', message: 'Invalid data' });
+    }
+
+    try {
+        const { error } = await supabase
+            .from('user_settings')
+            .upsert({ 
+                telegram_id: String(telegram_id), 
+                weight: parseFloat(weight), 
+                height: parseFloat(height) 
+            }, { onConflict: 'telegram_id' });
+
+        if (error) throw error;
+        res.json({ status: 'ok' });
+    } catch (e) {
+        console.error('Save profile error:', e);
+        res.status(500).json({ status: 'error', message: e.message });
+    }
+});
+
+// 3. Сохранение настроек (Дневная цель)
+app.post('/api/save-settings', async (req, res) => {
+    const { telegram_id, daily_goal } = req.body;
+    if (!telegram_id || !supabase) {
+        return res.status(400).json({ status: 'error', message: 'Invalid data' });
+    }
+
+    try {
+        const { error } = await supabase
+            .from('user_settings')
+            .upsert({ 
+                telegram_id: String(telegram_id), 
+                daily_goal: parseInt(daily_goal) 
+            }, { onConflict: 'telegram_id' });
+
+        if (error) throw error;
+        res.json({ status: 'ok' });
+    } catch (e) {
+        console.error('Save settings error:', e);
+        res.status(500).json({ status: 'error', message: e.message });
+    }
+});
+
+// 4. Добавление подхода отжиманий
+app.post('/api/add-pushup', async (req, res) => {
+    const { telegram_id, count } = req.body;
+    if (!telegram_id || !supabase || !count) {
+        return res.status(400).json({ status: 'error', message: 'Invalid data' });
+    }
+
+    try {
+        const { data, error } = await supabase
+            .from('pushups')
+            .insert([{ 
+                telegram_id: String(telegram_id), 
+                count: parseInt(count), 
+                created_at: new Date().toISOString() 
+            }])
+            .select();
+
+        if (error) throw error;
+        res.json({ status: 'ok', record: data[0] });
+    } catch (e) {
+        console.error('Add pushup error:', e);
+        res.status(500).json({ status: 'error', message: e.message });
+    }
+});
+
+// 5. Удаление подхода отжиманий
+app.post('/api/delete-pushup', async (req, res) => {
+    const { id } = req.body;
+    if (!id || !supabase) {
+        return res.status(400).json({ status: 'error', message: 'Invalid data' });
+    }
+
+    try {
+        const { error } = await supabase
+            .from('pushups')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ status: 'ok' });
+    } catch (e) {
+        console.error('Delete pushup error:', e);
+        res.status(500).json({ status: 'error', message: e.message });
+    }
+});
+
 // Webhook от Telegram для обработки кнопок в пушах
 app.post('/api/telegram-webhook', async (req, res) => {
     try {
@@ -97,7 +229,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
     }
 });
 
-// Роут для рассылки пушей (вызывать через Cron или UptimeRobot)
+// Роут для рассылки пушей
 app.get('/api/send-reminders', async (req, res) => {
     if (!supabase || !BOT_TOKEN) {
         return res.json({ status: 'error', message: 'Supabase or BOT_TOKEN not configured' });
@@ -149,7 +281,7 @@ app.get('/api/send-reminders', async (req, res) => {
     }
 });
 
-// Веб-приложение (Mini App HTML)
+// ---------------- MINI APP HTML ----------------
 const HTML_PAGE = `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -451,74 +583,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             text-align: center;
             outline: none;
         }
-        .form-select-sm {
-            background: var(--input-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 10px;
-            padding: 8px 12px;
-            color: #fff;
-            font-size: 13px;
-            font-weight: 600;
-            outline: none;
-        }
-        .checkbox-toggle {
-            width: 26px;
-            height: 26px;
-            background: var(--accent-green);
-            border-radius: 6px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            color: #fff;
-            font-weight: bold;
-            font-size: 14px;
-        }
-        .checkbox-toggle.off {
-            background: var(--input-bg);
-            color: transparent;
-            border: 1px solid var(--card-border);
-        }
-        .time-range-group {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .time-input-sm {
-            width: 75px;
-            background: var(--input-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 8px;
-            padding: 6px;
-            color: #fff;
-            font-size: 13px;
-            text-align: center;
-            outline: none;
-        }
-
-        .calendar-grid {
-            display: grid;
-            grid-template-columns: repeat(7, 1fr);
-            gap: 6px;
-            text-align: center;
-            margin-top: 10px;
-        }
-        .cal-day-cell {
-            aspect-ratio: 1;
-            background: var(--input-bg);
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 13px;
-            font-weight: 600;
-            color: #fff;
-        }
-        .cal-day-cell.active-day {
-            background: rgba(34, 197, 94, 0.2);
-            border: 1px solid var(--accent-green);
-            color: var(--accent-green);
-        }
 
         .bmi-box {
             background: var(--input-bg);
@@ -586,7 +650,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             <div class="badge-icon">1</div>
             <div class="badge-info">
                 <div class="subtitle">IOS FITNESS TRACKER</div>
-                <div class="title" id="streak-days-text">13-й день</div>
+                <div class="title" id="streak-days-text">Активный трекер</div>
             </div>
         </div>
 
@@ -641,25 +705,6 @@ const HTML_PAGE = `<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- КАЛЕНДАРЬ -->
-    <div id="screen-calendar" class="screen">
-        <div class="card">
-            <div class="card-header-title" style="display:flex; justify-content:space-between; align-items:center;">
-                <span>КАЛЕНДАРЬ ТРЕНИРОВОК</span>
-                <span id="cal-month-title" style="color:#fff; font-size:13px;"></span>
-            </div>
-            <div class="calendar-grid" id="calendar-grid-container"></div>
-        </div>
-    </div>
-
-    <!-- ПРОГРЕСС -->
-    <div id="screen-progress" class="screen">
-        <div class="card">
-            <div class="card-header-title">СТАТИСТИКА ЗА 7 ДНЕЙ</div>
-            <div id="progress-bars-container" style="display:flex; align-items:flex-end; gap:8px; height:180px; padding-top:20px;"></div>
-        </div>
-    </div>
-
     <!-- ПРОФИЛЬ -->
     <div id="screen-profile" class="screen">
         <div class="card">
@@ -704,19 +749,11 @@ const HTML_PAGE = `<!DOCTYPE html>
 
 </div>
 
-<!-- Нижняя панель навигации -->
+<!-- Панель навигации -->
 <div class="nav-bar">
     <div class="nav-item active" onclick="switchTab('main')">
         <svg viewBox="0 0 24 24"><path d="M3 13h4v8H3zm7-8h4v16h-4zm7 4h4v12h-4z"/></svg>
         <span>Главная</span>
-    </div>
-    <div class="nav-item" onclick="switchTab('calendar')">
-        <svg viewBox="0 0 24 24"><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zm0-12H5V6h14v2z"/></svg>
-        <span>Календарь</span>
-    </div>
-    <div class="nav-item" onclick="switchTab('progress')">
-        <svg viewBox="0 0 24 24"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
-        <span>Прогресс</span>
     </div>
     <div class="nav-item" onclick="switchTab('profile')">
         <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
@@ -735,12 +772,12 @@ const HTML_PAGE = `<!DOCTYPE html>
         tg.expand();
     }
 
+    // Извлечение Telegram ID
+    const telegramId = tg?.initDataUnsafe?.user?.id || 123456789;
+
     let state = {
         dailyGoal: 100,
-        todaySets: [
-            { count: 35, time: "20:35" },
-            { count: 30, time: "20:33" }
-        ]
+        todaySets: []
     };
 
     function triggerHaptic() {
@@ -749,7 +786,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     function switchTab(tabName) {
         triggerHaptic();
-        const screens = ['main', 'calendar', 'progress', 'profile', 'settings'];
+        const screens = ['main', 'profile', 'settings'];
         const navItems = document.querySelectorAll('.nav-item');
 
         screens.forEach((s, idx) => {
@@ -762,6 +799,36 @@ const HTML_PAGE = `<!DOCTYPE html>
                 navItems[idx].classList.remove('active');
             }
         });
+    }
+
+    // Загрузка данных из БД при открытии
+    async function loadUserData() {
+        try {
+            const res = await fetch('/api/user-data?telegram_id=' + telegramId);
+            const data = await res.json();
+            
+            if (data.status === 'ok') {
+                if (data.settings) {
+                    state.dailyGoal = data.settings.daily_goal || 100;
+                    document.getElementById('prof-weight').value = data.settings.weight || 80;
+                    document.getElementById('prof-height').value = data.settings.height || 180;
+                    document.getElementById('set-daily-goal').value = state.dailyGoal;
+                    calcBMI();
+                }
+
+                if (data.pushups) {
+                    state.todaySets = data.pushups.map(item => ({
+                        id: item.id,
+                        count: item.count,
+                        time: new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                    }));
+                }
+
+                updateProgressUI();
+            }
+        } catch (e) {
+            console.error('Data load error:', e);
+        }
     }
 
     function updateProgressUI() {
@@ -796,12 +863,24 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
     }
 
-    function addQuick(count) {
+    async function addQuick(count) {
         triggerHaptic();
-        const now = new Date();
-        const timeStr = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
-        state.todaySets.unshift({ count: count, time: timeStr });
-        updateProgressUI();
+        try {
+            const res = await fetch('/api/add-pushup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ telegram_id: telegramId, count: count })
+            });
+            const data = await res.json();
+            if (data.status === 'ok') {
+                const now = new Date();
+                const timeStr = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
+                state.todaySets.unshift({ id: data.record?.id, count: count, time: timeStr });
+                updateProgressUI();
+            }
+        } catch (e) {
+            console.error('Error adding pushup:', e);
+        }
     }
 
     function submitCustomCount() {
@@ -813,8 +892,20 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
     }
 
-    function deleteSet(index) {
+    async function deleteSet(index) {
         triggerHaptic();
+        const item = state.todaySets[index];
+        if (item && item.id) {
+            try {
+                await fetch('/api/delete-pushup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: item.id })
+                });
+            } catch (e) {
+                console.error('Error deleting pushup:', e);
+            }
+        }
         state.todaySets.splice(index, 1);
         updateProgressUI();
     }
@@ -828,27 +919,57 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
     }
 
-    function saveProfileData() {
+    // Сохранение веса и роста
+    async function saveProfileData() {
         triggerHaptic();
-        if (tg) tg.showAlert('Профиль сохранен!');
+        const weight = document.getElementById('prof-weight').value;
+        const height = document.getElementById('prof-height').value;
+
+        try {
+            const res = await fetch('/api/save-profile', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ telegram_id: telegramId, weight: weight, height: height })
+            });
+            const data = await res.json();
+            if (data.status === 'ok') {
+                if (tg) tg.showAlert('Профиль успешно сохранен!');
+            } else {
+                if (tg) tg.showAlert('Ошибка сохранения: ' + data.message);
+            }
+        } catch (e) {
+            console.error('Save error:', e);
+        }
     }
 
-    function saveSettingsData() {
+    // Сохранение дневной цели
+    async function saveSettingsData() {
         triggerHaptic();
         const newGoal = parseInt(document.getElementById('set-daily-goal').value);
-        if (newGoal > 0) state.dailyGoal = newGoal;
-        updateProgressUI();
-        if (tg) tg.showAlert('Настройки сохранены!');
+
+        try {
+            const res = await fetch('/api/save-settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ telegram_id: telegramId, daily_goal: newGoal })
+            });
+            const data = await res.json();
+            if (data.status === 'ok') {
+                state.dailyGoal = newGoal;
+                updateProgressUI();
+                if (tg) tg.showAlert('Настройки сохранены!');
+            }
+        } catch (e) {
+            console.error('Save settings error:', e);
+        }
     }
 
-    // Инициализация
-    updateProgressUI();
-    calcBMI();
+    // Запуск при открытии
+    loadUserData();
 </script>
 </body>
 </html>`;
 
-// Отдача приложения по URL /webapp и /
 app.get('/webapp', (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(HTML_PAGE);
@@ -859,7 +980,6 @@ app.get('/', (req, res) => {
     res.send(HTML_PAGE);
 });
 
-// Запуск сервера
 app.listen(port, () => {
     console.log(`Server started on port ${port}`);
 });
