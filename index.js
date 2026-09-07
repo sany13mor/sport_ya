@@ -1,5 +1,6 @@
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
+const https = require('https');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -24,37 +25,41 @@ const inMemoryStore = {
 // Карта отложенных уведомлений (snooze)
 const snoozeMap = new Map();
 
-// Очистка памяти: раз в час удаляем просроченные таймеры
+// Очистка старых snooze записей каждый час
 setInterval(() => {
     const now = Date.now();
-    for (const [chatId, time] of snoozeMap.entries()) {
-        if (now > time) snoozeMap.delete(chatId);
+    for (const [key, value] of snoozeMap.entries()) {
+        if (value < now) {
+            snoozeMap.delete(key);
+        }
     }
-}, 60 * 60 * 1000);
+}, 3600000);
 
-// Хелпер отправки сообщений в Telegram через современный fetch API
-async function sendTelegramMessage(chatId, text, replyMarkup) {
-    if (!BOT_TOKEN) return;
-    try {
-        const payload = { chat_id: chatId, text: text, parse_mode: 'HTML' };
-        if (replyMarkup) payload.reply_markup = replyMarkup;
-
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-    } catch (e) {
-        console.error('TG API Error:', e);
+// Хелпер отправки сообщений в Telegram
+function sendTelegramMessage(chatId, text, replyMarkup) {
+    if (!BOT_TOKEN) {
+        console.warn('BOT_TOKEN not configured, cannot send message');
+        return;
     }
+    const payload = { chat_id: chatId, text: text, parse_mode: 'HTML' };
+    if (replyMarkup) payload.reply_markup = replyMarkup;
+
+    const data = JSON.stringify(payload);
+    const req = https.request({
+        hostname: 'api.telegram.org',
+        path: '/bot' + BOT_TOKEN + '/sendMessage',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
+    });
+    req.on('error', (e) => console.error('TG API Error:', e));
+    req.write(data);
+    req.end();
 }
 
 // ------------------- REST API ДЛЯ СОХРАНЕНИЯ И ПОЛУЧЕНИЯ ДАННЫХ -------------------
 
-// 1. Загрузка данных пользователя (с лимитом для предотвращения зависаний)
+// 1. Загрузка всех данных пользователя
 app.get('/api/user-data', async (req, res) => {
-    // Внимание для продакшена: req.query.telegram_id небезопасен. 
-    // В идеале нужно передавать Telegram initData и валидировать его через BOT_TOKEN.
     const telegramId = String(req.query.telegram_id || 'demo_user');
 
     if (!supabase) {
@@ -62,20 +67,14 @@ app.get('/api/user-data', async (req, res) => {
             status: 'ok',
             settings: inMemoryStore.settings[telegramId] || null,
             profile: inMemoryStore.profiles[telegramId] || null,
-            pushups: inMemoryStore.pushups.filter(p => p.telegram_id === telegramId).slice(0, 300)
+            pushups: inMemoryStore.pushups.filter(p => p.telegram_id === telegramId)
         });
     }
 
     try {
         const { data: settings } = await supabase.from('user_settings').select('*').eq('telegram_id', telegramId).maybeSingle();
         const { data: profile } = await supabase.from('user_profiles').select('*').eq('telegram_id', telegramId).maybeSingle();
-        
-        // Лимитируем 300 записями, чтобы не положить фронтенд при длительном использовании
-        const { data: pushups } = await supabase.from('pushups')
-            .select('*')
-            .eq('telegram_id', telegramId)
-            .order('created_at', { ascending: false })
-            .limit(300);
+        const { data: pushups } = await supabase.from('pushups').select('*').eq('telegram_id', telegramId).order('created_at', { ascending: false });
 
         res.json({
             status: 'ok',
@@ -89,7 +88,7 @@ app.get('/api/user-data', async (req, res) => {
             status: 'ok',
             settings: inMemoryStore.settings[telegramId] || null,
             profile: inMemoryStore.profiles[telegramId] || null,
-            pushups: inMemoryStore.pushups.filter(p => p.telegram_id === telegramId).slice(0, 300)
+            pushups: inMemoryStore.pushups.filter(p => p.telegram_id === telegramId)
         });
     }
 });
@@ -178,7 +177,6 @@ app.post('/api/save-settings', async (req, res) => {
         if (error) throw error;
         res.json({ status: 'ok' });
     } catch (e) {
-        console.error('Save settings error:', e);
         res.json({ status: 'ok' });
     }
 });
@@ -205,67 +203,77 @@ app.post('/api/save-profile', async (req, res) => {
         if (error) throw error;
         res.json({ status: 'ok' });
     } catch (e) {
-        console.error('Save profile error:', e);
         res.json({ status: 'ok' });
     }
 });
 
-// 6. Webhook от Telegram
+// Webhook от Telegram
 app.post('/api/telegram-webhook', async (req, res) => {
-    // Немедленный ответ, чтобы Telegram не дублировал запросы (таймаут фикс)
-    res.status(200).send('OK');
-
     try {
         const update = req.body;
-        if (!update || !update.callback_query) return;
+        if (update && update.callback_query) {
+            const cb = update.callback_query;
+            const chatId = cb.message.chat.id;
+            const data = cb.data;
 
-        const cb = update.callback_query;
-        const chatId = cb.message.chat.id;
-        const data = cb.data;
-
-        if (data.startsWith('add_')) {
-            const count = parseInt(data.replace('add_', ''));
-            if (count > 0) {
-                if (supabase) {
-                    await supabase.from('pushups').insert([{
-                        telegram_id: String(chatId),
-                        count: count,
-                        created_at: new Date().toISOString()
-                    }]);
-                } else {
-                    inMemoryStore.pushups.unshift({
-                        id: 'p_' + Date.now(),
-                        telegram_id: String(chatId),
-                        count: count,
-                        created_at: new Date().toISOString()
-                    });
+            if (data.startsWith('add_')) {
+                const count = parseInt(data.replace('add_', ''));
+                if (count > 0) {
+                    if (supabase) {
+                        await supabase.from('pushups').insert([{
+                            telegram_id: String(chatId),
+                            count: count,
+                            created_at: new Date().toISOString()
+                        }]);
+                    } else {
+                        inMemoryStore.pushups.unshift({
+                            id: 'p_' + Date.now(),
+                            telegram_id: String(chatId),
+                            count: count,
+                            created_at: new Date().toISOString()
+                        });
+                    }
                 }
+                const ackPayload = JSON.stringify({
+                    callback_query_id: cb.id,
+                    text: 'Записано +' + count + ' отжиманий! 🔥',
+                    show_alert: true
+                });
+                const ackReq = https.request({
+                    hostname: 'api.telegram.org',
+                    path: '/bot' + BOT_TOKEN + '/answerCallbackQuery',
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(ackPayload) }
+                });
+                ackReq.write(ackPayload);
+                ackReq.end();
+
+                sendTelegramMessage(chatId, '✅ <b>Записано +' + count + ' отжиманий!</b>\nОтличная работа! 💪');
+            } else if (data.startsWith('snooze_')) {
+                const mins = parseInt(data.replace('snooze_', ''));
+                snoozeMap.set(String(chatId), Date.now() + mins * 60 * 1000);
+
+                const ackPayload = JSON.stringify({
+                    callback_query_id: cb.id,
+                    text: 'Напоминание отложено на ' + mins + ' мин. ⏳',
+                    show_alert: true
+                });
+                const ackReq = https.request({
+                    hostname: 'api.telegram.org',
+                    path: '/bot' + BOT_TOKEN + '/answerCallbackQuery',
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(ackPayload) }
+                });
+                ackReq.write(ackPayload);
+                ackReq.end();
+
+                sendTelegramMessage(chatId, '⏰ Напомню об отжиманиях через <b>' + mins + ' минут</b>!');
             }
-
-            // Отправляем Alert об успехе
-            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ callback_query_id: cb.id, text: 'Записано +' + count + ' отжиманий! 🔥', show_alert: true })
-            });
-
-            sendTelegramMessage(chatId, '✅ <b>Записано +' + count + ' отжиманий!</b>\nОтличная работа! 💪');
-            
-        } else if (data.startsWith('snooze_')) {
-            const mins = parseInt(data.replace('snooze_', ''));
-            snoozeMap.set(String(chatId), Date.now() + mins * 60 * 1000);
-
-            // Отправляем Alert об успехе
-            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ callback_query_id: cb.id, text: 'Напоминание отложено на ' + mins + ' мин. ⏳', show_alert: true })
-            });
-
-            sendTelegramMessage(chatId, '⏰ Напомню об отжиманиях через <b>' + mins + ' минут</b>!');
         }
+        res.status(200).send('OK');
     } catch (e) {
-        console.error('Webhook processing error:', e);
+        console.error('Webhook error:', e);
+        res.status(500).send('Error');
     }
 });
 
@@ -320,7 +328,12 @@ const HTML_PAGE = `<!DOCTYPE html>
             overflow-x: hidden;
         }
 
-        .container { max-width: 460px; margin: 0 auto; padding: 12px 16px; }
+        .container {
+            max-width: 460px;
+            margin: 0 auto;
+            padding: 12px 16px;
+        }
+
         .screen { display: none; }
         .screen.active { display: block; animation: fadeIn 0.2s ease-in-out; }
 
@@ -348,119 +361,363 @@ const HTML_PAGE = `<!DOCTYPE html>
             margin-bottom: 12px;
         }
 
-        .badge-card { display: flex; align-items: center; gap: 14px; }
+        .badge-card {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
         .badge-icon {
-            width: 44px; height: 44px; border-radius: 50%;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
             background: linear-gradient(135deg, #10b981 0%, #0ea5e9 100%);
-            display: flex; align-items: center; justify-content: center;
-            font-size: 18px; font-weight: 800; color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: 800;
+            color: #fff;
             box-shadow: 0 2px 10px rgba(16, 185, 129, 0.3);
         }
         .badge-info .subtitle {
-            font-size: 10px; font-weight: 700; letter-spacing: 0.6px;
-            color: var(--text-muted); text-transform: uppercase;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.6px;
+            color: var(--text-muted);
+            text-transform: uppercase;
         }
-        .badge-info .title { font-size: 18px; font-weight: 800; color: #fff; margin-top: 2px; }
+        .badge-info .title {
+            font-size: 18px;
+            font-weight: 800;
+            color: #fff;
+            margin-top: 2px;
+        }
 
-        .progress-content { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-        .ring-container { position: relative; width: 105px; height: 105px; flex-shrink: 0; }
-        .ring-svg { transform: rotate(-90deg); width: 100%; height: 100%; }
-        .ring-bg { stroke: rgba(255, 255, 255, 0.08); stroke-width: 8; fill: none; }
-        .ring-fill {
-            stroke: url(#gradient); stroke-width: 8; fill: none; stroke-linecap: round;
-            stroke-dasharray: 264; stroke-dashoffset: 264; transition: stroke-dashoffset 0.6s ease;
+        .progress-content {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
         }
-        .ring-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; font-weight: 800; color: #fff; }
-        
+        .ring-container {
+            position: relative;
+            width: 105px;
+            height: 105px;
+            flex-shrink: 0;
+        }
+        .ring-svg {
+            transform: rotate(-90deg);
+            width: 100%;
+            height: 100%;
+        }
+        .ring-bg {
+            stroke: rgba(255, 255, 255, 0.08);
+            stroke-width: 8;
+            fill: none;
+        }
+        .ring-fill {
+            stroke: url(#gradient);
+            stroke-width: 8;
+            fill: none;
+            stroke-linecap: round;
+            stroke-dasharray: 264;
+            stroke-dashoffset: 264;
+            transition: stroke-dashoffset 0.6s ease;
+        }
+        .ring-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 18px;
+            font-weight: 800;
+            color: #fff;
+        }
         .stats-col { flex-grow: 1; }
         .stat-block { margin-bottom: 10px; }
         .stat-block:last-child { margin-bottom: 0; }
-        .stat-num-main { font-size: 26px; font-weight: 800; color: #fff; line-height: 1.1; }
-        .stat-num-blue { font-size: 22px; font-weight: 800; color: var(--accent-blue); line-height: 1.1; }
-        .stat-lbl { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
-
-        .quick-buttons { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 12px; }
-        .btn-quick {
-            background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px;
-            color: #fff; font-size: 14px; font-weight: 700; padding: 10px 0; text-align: center;
-            cursor: pointer; transition: all 0.15s ease;
+        .stat-num-main {
+            font-size: 26px;
+            font-weight: 800;
+            color: #fff;
+            line-height: 1.1;
         }
-        .btn-quick:active { transform: scale(0.95); background: #2a3447; }
+        .stat-num-blue {
+            font-size: 22px;
+            font-weight: 800;
+            color: var(--accent-blue);
+            line-height: 1.1;
+        }
+        .stat-lbl {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
 
-        .input-row { display: flex; gap: 8px; width: 100%; align-items: center; }
+        .quick-buttons {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .btn-quick {
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            color: #fff;
+            font-size: 14px;
+            font-weight: 700;
+            padding: 10px 0;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .btn-quick:active {
+            transform: scale(0.95);
+            background: #2a3447;
+        }
+
+        .input-row {
+            display: flex;
+            gap: 8px;
+            width: 100%;
+            align-items: center;
+        }
         .custom-input {
-            flex: 1; min-width: 0; background: var(--input-bg); border: 1px solid var(--card-border);
-            border-radius: 12px; padding: 12px 10px; color: #fff; font-size: 14px; outline: none;
+            flex: 1;
+            min-width: 0;
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 12px 10px;
+            color: #fff;
+            font-size: 14px;
+            outline: none;
         }
         .custom-input::placeholder { color: var(--text-muted); }
 
         .btn-green {
-            flex-shrink: 0; background: var(--accent-green); color: #fff; border: none;
-            border-radius: 12px; padding: 12px 16px; font-size: 14px; font-weight: 700;
-            cursor: pointer; transition: background 0.15s ease, transform 0.1s ease; white-space: nowrap;
+            flex-shrink: 0;
+            background: var(--accent-green);
+            color: #fff;
+            border: none;
+            border-radius: 12px;
+            padding: 12px 16px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.15s ease, transform 0.1s ease;
+            white-space: nowrap;
         }
-        .btn-green:active { background: var(--accent-green-hover); transform: scale(0.98); }
-        .btn-full { width: 100%; display: block; margin-top: 14px; padding: 14px; text-align: center; }
+        .btn-green:active {
+            background: var(--accent-green-hover);
+            transform: scale(0.98);
+        }
+        .btn-full {
+            width: 100%;
+            display: block;
+            margin-top: 14px;
+            padding: 14px;
+            text-align: center;
+        }
 
-        .sets-list { display: flex; flex-direction: column; gap: 8px; }
+        .sets-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
         .set-item {
-            background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.04);
-            border-radius: 12px; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 12px;
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
-        .set-count { font-size: 16px; font-weight: 800; color: var(--accent-green); }
-        .set-time { font-size: 13px; color: var(--text-muted); display: flex; align-items: center; gap: 10px; }
-        .btn-del-set { color: #ef4444; background: none; border: none; font-size: 16px; cursor: pointer; padding: 0 4px; }
+        .set-count {
+            font-size: 16px;
+            font-weight: 800;
+            color: var(--accent-green);
+        }
+        .set-time {
+            font-size: 13px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .btn-del-set {
+            color: #ef4444;
+            background: none;
+            border: none;
+            font-size: 16px;
+            cursor: pointer;
+            padding: 0 4px;
+        }
 
-        .form-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+        .form-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
         .form-row:last-child { border-bottom: none; }
-        .form-label-box { display: flex; flex-direction: column; gap: 2px; }
-        .form-label-main { font-size: 15px; font-weight: 600; color: #fff; }
-        .form-label-sub { font-size: 12px; color: var(--text-muted); }
+        .form-label-box {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .form-label-main {
+            font-size: 15px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .form-label-sub {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
         .form-input-sm {
-            width: 90px; background: var(--input-bg); border: 1px solid var(--card-border);
-            border-radius: 10px; padding: 8px 10px; color: #fff; font-size: 15px;
-            font-weight: 600; text-align: center; outline: none;
+            width: 90px;
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            padding: 8px 10px;
+            color: #fff;
+            font-size: 15px;
+            font-weight: 600;
+            text-align: center;
+            outline: none;
         }
         .form-select-sm {
-            background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px;
-            padding: 8px 12px; color: #fff; font-size: 13px; font-weight: 600; outline: none;
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            padding: 8px 12px;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 600;
+            outline: none;
         }
         .checkbox-toggle {
-            width: 26px; height: 26px; background: var(--accent-green); border-radius: 6px;
-            display: flex; align-items: center; justify-content: center; cursor: pointer;
-            color: #fff; font-weight: bold; font-size: 14px;
+            width: 26px;
+            height: 26px;
+            background: var(--accent-green);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            color: #fff;
+            font-weight: bold;
+            font-size: 14px;
         }
-        .checkbox-toggle.off { background: var(--input-bg); color: transparent; border: 1px solid var(--card-border); }
-        .time-range-group { display: flex; align-items: center; gap: 6px; }
+        .checkbox-toggle.off {
+            background: var(--input-bg);
+            color: transparent;
+            border: 1px solid var(--card-border);
+        }
+        .time-range-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
         .time-input-sm {
-            width: 75px; background: var(--input-bg); border: 1px solid var(--card-border);
-            border-radius: 8px; padding: 6px; color: #fff; font-size: 13px; text-align: center; outline: none;
+            width: 75px;
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 6px;
+            color: #fff;
+            font-size: 13px;
+            text-align: center;
+            outline: none;
         }
 
-        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; text-align: center; margin-top: 10px; }
-        .cal-day-head { font-size: 12px; color: var(--text-muted); font-weight: 700; padding-bottom: 6px; }
+        .calendar-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 6px;
+            text-align: center;
+            margin-top: 10px;
+        }
+        .cal-day-head {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-weight: 700;
+            padding-bottom: 6px;
+        }
         .cal-day-cell {
-            aspect-ratio: 1; background: var(--input-bg); border-radius: 10px; display: flex;
-            flex-direction: column; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: #fff;
+            aspect-ratio: 1;
+            background: var(--input-bg);
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: #fff;
         }
-        .cal-day-cell.active-day { background: rgba(34, 197, 94, 0.2); border: 1px solid var(--accent-green); color: var(--accent-green); }
+        .cal-day-cell.active-day {
+            background: rgba(34, 197, 94, 0.2);
+            border: 1px solid var(--accent-green);
+            color: var(--accent-green);
+        }
 
-        .bmi-box { background: var(--input-bg); border-radius: 12px; padding: 14px; text-align: center; margin-top: 12px; }
-        .bmi-value { font-size: 24px; font-weight: 800; color: #fff; }
+        .bmi-box {
+            background: var(--input-bg);
+            border-radius: 12px;
+            padding: 14px;
+            text-align: center;
+            margin-top: 12px;
+        }
+        .bmi-value {
+            font-size: 24px;
+            font-weight: 800;
+            color: #fff;
+        }
         .bmi-status {
-            display: inline-block; margin-top: 6px; padding: 4px 12px; border-radius: 20px;
-            font-size: 12px; font-weight: 700; background: rgba(34, 197, 94, 0.2); color: var(--accent-green);
+            display: inline-block;
+            margin-top: 6px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--accent-green);
         }
 
         .nav-bar {
-            position: fixed; bottom: 0; left: 0; right: 0; height: calc(65px + env(safe-area-inset-bottom, 15px));
-            background: rgba(18, 24, 36, 0.96); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-            border-top: 1px solid rgba(255, 255, 255, 0.08); display: flex; align-items: center; justify-content: space-around;
-            padding-bottom: env(safe-area-inset-bottom, 15px); z-index: 9999;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: calc(65px + env(safe-area-inset-bottom, 15px));
+            background: rgba(18, 24, 36, 0.96);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            display: flex;
+            align-items: center;
+            justify-content: space-around;
+            padding-bottom: env(safe-area-inset-bottom, 15px);
+            z-index: 9999;
         }
         .nav-item {
-            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
-            color: var(--tab-inactive); font-size: 11px; font-weight: 600; cursor: pointer; width: 20%; height: 100%; transition: color 0.15s ease;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            color: var(--tab-inactive);
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 20%;
+            height: 100%;
+            transition: color 0.15s ease;
         }
         .nav-item svg { width: 22px; height: 22px; fill: currentColor; pointer-events: none; }
         .nav-item span { pointer-events: none; }
@@ -470,8 +727,10 @@ const HTML_PAGE = `<!DOCTYPE html>
 <body>
 
 <div class="container">
+
     <!-- ГЛАВНАЯ -->
     <div id="screen-main" class="screen active">
+        
         <div class="card badge-card">
             <div class="badge-icon" id="streak-icon">1</div>
             <div class="badge-info">
@@ -529,6 +788,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             <div class="card-header-title">СЕГОДНЯШНИЕ ПОДХОДЫ</div>
             <div id="today-sets-list" class="sets-list"></div>
         </div>
+
     </div>
 
     <!-- КАЛЕНДАРЬ -->
@@ -646,6 +906,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             <button class="btn-green btn-full" onclick="saveSettingsData()">Сохранить настройки</button>
         </div>
     </div>
+
 </div>
 
 <!-- Нижняя панель навигации -->
@@ -667,7 +928,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         <span>Профиль</span>
     </div>
     <div class="nav-item" onclick="switchTab('settings')">
-        <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6-3.6 3.6z"/></svg>
+        <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
         <span>Настройки</span>
     </div>
 </div>
@@ -694,6 +955,8 @@ const HTML_PAGE = `<!DOCTYPE html>
         pushupsHistory: []
     };
 
+    let updateTimeout = null;
+
     function formatDateLocal(d) {
         const dateObj = new Date(d);
         const y = dateObj.getFullYear();
@@ -712,6 +975,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
     }
 
+    // Загрузка данных при старте
     async function loadUserData() {
         try {
             const res = await fetch('/api/user-data?telegram_id=' + telegramId);
@@ -788,43 +1052,53 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     function getTodaySets() {
         const todayStr = formatDateLocal(new Date());
-        return state.pushupsHistory.filter(item => formatDateLocal(item.created_at) === todayStr);
+        return state.pushupsHistory.filter(item => {
+            return formatDateLocal(item.created_at) === todayStr;
+        });
     }
 
     function updateProgressUI() {
-        const todaySets = getTodaySets();
-        const total = todaySets.reduce((a, b) => a + b.count, 0);
-
-        document.getElementById('today-total').innerText = total;
-        document.getElementById('target-goal').innerText = state.dailyGoal;
-        document.getElementById('today-sets-count').innerText = todaySets.length;
-
-        const pct = Math.min(100, Math.round((total / state.dailyGoal) * 100)) || 0;
-        document.getElementById('ring-pct').innerText = pct + '%';
-
-        const circle = document.getElementById('ring-progress');
-        const circumference = 2 * Math.PI * 42;
-        const offset = circumference - (pct / 100) * circumference;
-        circle.style.strokeDashoffset = offset;
-
-        const listEl = document.getElementById('today-sets-list');
-        listEl.innerHTML = '';
-        if (todaySets.length === 0) {
-            listEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; text-align:center; padding:10px;">Подходов пока нет</div>';
-        } else {
-            todaySets.forEach((item) => {
-                const dateObj = new Date(item.created_at);
-                const timeStr = String(dateObj.getHours()).padStart(2, '0') + ':' + String(dateObj.getMinutes()).padStart(2, '0');
-                const div = document.createElement('div');
-                div.className = 'set-item';
-                div.innerHTML = '<span class="set-count">+' + item.count + '</span>' +
-                                '<div class="set-time">' +
-                                    '<span>' + timeStr + '</span>' +
-                                    '<button class="btn-del-set" onclick="deleteSet(\\'' + item.id + '\\')">✕</button>' +
-                                '</div>';
-                listEl.appendChild(div);
-            });
+        if (updateTimeout) {
+            clearTimeout(updateTimeout);
         }
+        
+        updateTimeout = setTimeout(() => {
+            const todaySets = getTodaySets();
+            const total = todaySets.reduce((a, b) => a + b.count, 0);
+
+            document.getElementById('today-total').innerText = total;
+            document.getElementById('target-goal').innerText = state.dailyGoal;
+            document.getElementById('today-sets-count').innerText = todaySets.length;
+
+            const pct = Math.min(100, Math.round((total / state.dailyGoal) * 100)) || 0;
+            document.getElementById('ring-pct').innerText = pct + '%';
+
+            const circle = document.getElementById('ring-progress');
+            const circumference = 2 * Math.PI * 42;
+            const offset = circumference - (pct / 100) * circumference;
+            circle.style.strokeDashoffset = offset;
+
+            const listEl = document.getElementById('today-sets-list');
+            listEl.innerHTML = '';
+            if (todaySets.length === 0) {
+                listEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; text-align:center; padding:10px;">Подходов пока нет</div>';
+            } else {
+                todaySets.forEach((item) => {
+                    const dateObj = new Date(item.created_at);
+                    const timeStr = String(dateObj.getHours()).padStart(2, '0') + ':' + String(dateObj.getMinutes()).padStart(2, '0');
+                    const div = document.createElement('div');
+                    div.className = 'set-item';
+                    div.innerHTML = '<span class="set-count">+' + item.count + '</span>' +
+                                    '<div class="set-time">' +
+                                        '<span>' + timeStr + '</span>' +
+                                        '<button class="btn-del-set" onclick="deleteSet(\'' + item.id + '\')">✕</button>' +
+                                    '</div>';
+                    listEl.appendChild(div);
+                });
+            }
+            
+            updateTimeout = null;
+        }, 100);
     }
 
     function addQuick(num) {
@@ -901,15 +1175,19 @@ const HTML_PAGE = `<!DOCTYPE html>
             const statusEl = document.getElementById('bmi-status-label');
             if (bmi < 18.5) {
                 statusEl.innerText = 'Дефицит массы';
+                statusEl.style.backgroundColor = 'rgba(56, 189, 248, 0.2)';
                 statusEl.style.color = '#38bdf8';
             } else if (bmi < 25) {
                 statusEl.innerText = 'Норма';
+                statusEl.style.backgroundColor = 'rgba(34, 197, 94, 0.2)';
                 statusEl.style.color = '#22c55e';
             } else if (bmi < 30) {
                 statusEl.innerText = 'Избыточный вес';
+                statusEl.style.backgroundColor = 'rgba(245, 158, 11, 0.2)';
                 statusEl.style.color = '#f59e0b';
             } else {
                 statusEl.innerText = 'Ожирение';
+                statusEl.style.backgroundColor = 'rgba(239, 68, 68, 0.2)';
                 statusEl.style.color = '#ef4444';
             }
         }
@@ -972,6 +1250,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         const container = document.getElementById('calendar-grid-container');
         container.innerHTML = '';
         const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+        
         dayNames.forEach(d => {
             const head = document.createElement('div');
             head.className = 'cal-day-head';
@@ -982,17 +1261,20 @@ const HTML_PAGE = `<!DOCTYPE html>
         const now = new Date();
         document.getElementById('cal-month-title').innerText = now.toLocaleString('ru', { month: 'long', year: 'numeric' });
 
-        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-        
-        // ВЫЧИСЛЕНИЕ ПУСТЫХ ЯЧЕЕК ПЕРЕД НАЧАЛОМ МЕСЯЦА (фикс съехавших дней недели)
-        const firstDayIndex = new Date(now.getFullYear(), now.getMonth(), 1).getDay();
-        const emptyCells = (firstDayIndex + 6) % 7;
+        // ИСПРАВЛЕНО: добавлено смещение для правильного отображения календаря
+        const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const startDayOfWeek = (firstDayOfMonth.getDay() + 6) % 7; // 0 = Monday
 
-        for (let i = 0; i < emptyCells; i++) {
-            const emptyCell = document.createElement('div');
-            container.appendChild(emptyCell);
+        // Добавляем пустые ячейки до первого дня месяца
+        for (let i = 0; i < startDayOfWeek; i++) {
+            const empty = document.createElement('div');
+            empty.className = 'cal-day-cell';
+            empty.style.opacity = '0.3';
+            empty.innerHTML = '<span></span>';
+            container.appendChild(empty);
         }
 
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
         for (let i = 1; i <= daysInMonth; i++) {
             const cell = document.createElement('div');
             cell.className = 'cal-day-cell';
@@ -1040,7 +1322,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             bar.style.cssText = 'width:100%; border-radius:6px; background:' + (i === currentDayOfWeek ? 'var(--accent-green)' : 'var(--input-bg)') + '; height:' + Math.max(8, pct) + '%; transition:height 0.3s ease;';
 
             const lbl = document.createElement('div');
-            lbl.style.cssText = 'font-size:11px; color:var(--text-muted);';
+            lbl.style.cssText = 'font-size:11px; color:var(--text-muted); font-weight:600;';
             lbl.innerText = dayNames[i];
 
             col.appendChild(bar);
@@ -1061,5 +1343,7 @@ app.get('*', (req, res, next) => {
 });
 
 app.listen(port, () => {
-    console.log('Server is running on port ' + port);
+    console.log('✅ Server is running on port ' + port);
+    if (!BOT_TOKEN) console.warn('⚠️  BOT_TOKEN not configured');
+    if (!supabase) console.warn('⚠️  Supabase not configured, using in-memory storage');
 });
