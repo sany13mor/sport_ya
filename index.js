@@ -9,16 +9,17 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
-if (!SUPABASE_URL || !SUPABASE_URL.startsWith('http')) {
-    console.error('❌ SUPABASE_URL не задан или некорректен.');
-}
-
-const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+const supabase = (SUPABASE_URL && SUPABASE_KEY && SUPABASE_URL.startsWith('http')) 
+    ? createClient(SUPABASE_URL, SUPABASE_KEY) 
+    : null;
 
 app.use(express.json());
 
-// --- HELPER ДЛЯ ОТПРАВКИ СООБЩЕНИЙ В TELEGRAM ---
-function sendTelegramMessage(chatId, text, replyMarkup = null) {
+// Карта отложенных уведомлений (snooze)
+const snoozeMap = new Map();
+
+// Хелпер отправки сообщений в Telegram
+function sendTelegramMessage(chatId, text, replyMarkup) {
     if (!BOT_TOKEN) return;
     const payload = { chat_id: chatId, text: text, parse_mode: 'HTML' };
     if (replyMarkup) payload.reply_markup = replyMarkup;
@@ -30,584 +31,1002 @@ function sendTelegramMessage(chatId, text, replyMarkup = null) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
     });
-    req.on('error', (e) => console.error('Ошибка TG API:', e));
+    req.on('error', (e) => console.error('TG API Error:', e));
     req.write(data);
     req.end();
 }
 
-// --- ПРОВЕРКА НАПОМИНАНИЙ ПО ДИАПАЗОНУ ВРЕМЕНИ ---
-setInterval(async () => {
-    if (!supabase) return;
-    const now = new Date();
-    const currentHHMM = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
-
-    try {
-        const { data: users } = await supabase.from('user_settings').select('*').eq('notifications_enabled', true);
-        if (!users) return;
-
-        users.forEach(user => {
-            const start = user.reminder_start || '09:00';
-            const end = user.reminder_end || '22:00';
-
-            // Проверка попадания в диапазон времени
-            if (currentHHMM >= start && currentHHMM <= end && currentHHMM.endsWith(':00')) {
-                const keyboard = {
-                    inline_keyboard: [
-                        [
-                            { text: '+10 🏋️', callback_data: 'add_10' },
-                            { text: '+20 🏋️', callback_data: 'add_20' },
-                            { text: '+30 🏋️', callback_data: 'add_30' }
-                        ],
-                        [
-                            { text: '⏳ 15 мин', callback_data: 'snooze_15' },
-                            { text: '⏳ 30 мин', callback_data: 'snooze_30' },
-                            { text: '⏳ 45 мин', callback_data: 'snooze_45' },
-                            { text: '⏳ 1 час', callback_data: 'snooze_60' }
-                        ]
-                    ]
-                };
-
-                const msg = '🔥 <b>Fitness Reminder</b>\nПора сделать подход! Дневная цель: <b>' + (user.daily_goal || 100) + '</b>.';
-                sendTelegramMessage(user.user_id, msg, keyboard);
-            }
-        });
-    } catch (e) {
-        console.error('Ошибка проверки напоминаний:', e);
-    }
-}, 60000);
-
-// --- WEBHOOK ДЛЯ КНОПОК БОТА (ФИКСАЦИЯ И ПЕРЕНОС) ---
+// Webhook от Telegram для обработки кнопок в пушах
 app.post('/api/telegram-webhook', async (req, res) => {
-    const { callback_query } = req.body;
-    if (callback_query && supabase) {
-        const chatId = callback_query.message.chat.id;
-        const action = callback_query.data;
+    try {
+        const update = req.body;
+        if (update && update.callback_query) {
+            const cb = update.callback_query;
+            const chatId = cb.message.chat.id;
+            const data = cb.data;
 
-        if (action.startsWith('add_')) {
-            const count = parseInt(action.replace('add_', ''));
-            await supabase.from('pushups').insert([{ user_id: String(chatId), count: count, exercise_type: 'pushups' }]);
-            sendTelegramMessage(chatId, '✅ Зафиксировано <b>+' + count + '</b> повторений в статистику!');
-        } else if (action.startsWith('snooze_')) {
-            const mins = parseInt(action.replace('snooze_', ''));
-            sendTelegramMessage(chatId, '⏳ Напоминание отложено на <b>' + mins + ' минут</b>.');
-            
-            // Запланировать отложенное напоминание
-            setTimeout(() => {
-                const keyboard = {
-                    inline_keyboard: [
-                        [
-                            { text: '+10 🏋️', callback_data: 'add_10' },
-                            { text: '+20 🏋️', callback_data: 'add_20' },
-                            { text: '+30 🏋️', callback_data: 'add_30' }
-                        ],
-                        [
-                            { text: '⏳ 15 мин', callback_data: 'snooze_15' },
-                            { text: '⏳ 30 мин', callback_data: 'snooze_30' },
-                            { text: '⏳ 45 мин', callback_data: 'snooze_45' },
-                            { text: '⏳ 1 час', callback_data: 'snooze_60' }
-                        ]
-                    ]
-                };
-                sendTelegramMessage(chatId, '⏰ <b>Отложенное напоминание!</b>\nПора сделать подход!', keyboard);
-            }, mins * 60 * 1000);
+            if (data.startsWith('add_')) {
+                const count = parseInt(data.replace('add_', ''));
+                if (supabase && count > 0) {
+                    await supabase.from('pushups').insert([{
+                        telegram_id: String(chatId),
+                        count: count,
+                        created_at: new Date().toISOString()
+                    }]);
+                }
+                const ackPayload = JSON.stringify({
+                    callback_query_id: cb.id,
+                    text: 'Записано +' + count + ' отжиманий! 🔥',
+                    show_alert: true
+                });
+                const ackReq = https.request({
+                    hostname: 'api.telegram.org',
+                    path: '/bot' + BOT_TOKEN + '/answerCallbackQuery',
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(ackPayload) }
+                });
+                ackReq.write(ackPayload);
+                ackReq.end();
+
+                sendTelegramMessage(chatId, '✅ <b>Записано +' + count + ' отжиманий!</b>\nОтличная работа! 💪');
+            } else if (data.startsWith('snooze_')) {
+                const mins = parseInt(data.replace('snooze_', ''));
+                snoozeMap.set(String(chatId), Date.now() + mins * 60 * 1000);
+
+                const ackPayload = JSON.stringify({
+                    callback_query_id: cb.id,
+                    text: 'Напоминание отложено на ' + mins + ' мин. ⏳',
+                    show_alert: true
+                });
+                const ackReq = https.request({
+                    hostname: 'api.telegram.org',
+                    path: '/bot' + BOT_TOKEN + '/answerCallbackQuery',
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(ackPayload) }
+                });
+                ackReq.write(ackPayload);
+                ackReq.end();
+
+                sendTelegramMessage(chatId, '⏰ Напомню об отжиманиях через <b>' + mins + ' минут</b>!');
+            }
         }
+        res.status(200).send('OK');
+    } catch (e) {
+        console.error('Webhook error:', e);
+        res.status(500).send('Error');
     }
-    res.sendStatus(200);
 });
 
-// --- API ENDPOINTS ---
+// Роут для рассылки пушей (вызывать через Cron или UptimeRobot)
+app.get('/api/send-reminders', async (req, res) => {
+    if (!supabase || !BOT_TOKEN) {
+        return res.json({ status: 'error', message: 'Supabase or BOT_TOKEN not configured' });
+    }
+    try {
+        const { data: users, error } = await supabase.from('user_settings').select('*');
+        if (error) throw error;
 
-app.post('/api/add', async (req, res) => {
-    const { user_id, count, exercise_type } = req.body;
-    if (!supabase) return res.status(500).json({ error: 'База данных не настроена' });
-    const { data, error } = await supabase.from('pushups').insert([{
-        user_id: String(user_id || 'guest'),
-        count: parseInt(count),
-        exercise_type: exercise_type || 'pushups'
-    }]).select();
-    if (error) return res.status(500).json({ error: error.message });
-    res.json({ success: true, data });
+        const now = new Date();
+        const currentHour = (now.getUTCHours() + 3) % 24; // МСК (UTC+3)
+        const currentMins = now.getUTCMinutes();
+        const currentHM = (currentHour < 10 ? '0' : '') + currentHour + ':' + (currentMins < 10 ? '0' : '') + currentMins;
+
+        let sentCount = 0;
+        for (const user of users || []) {
+            if (!user.notifications_enabled || !user.telegram_id) continue;
+
+            const start = user.time_start || "09:00";
+            const end = user.time_end || "22:00";
+
+            // Проверка диапазона времени
+            if (currentHM < start || currentHM > end) continue;
+
+            // Проверка отсрочки (snooze)
+            const snoozeUntil = snoozeMap.get(String(user.telegram_id));
+            if (snoozeUntil && Date.now() < snoozeUntil) continue;
+
+            const text = "🏋️ <b>Пора отжаться!</b>\nВыберите количество выполненных подходов или отложите уведомление:";
+            const replyMarkup = {
+                inline_keyboard: [
+                    [
+                        { text: "+10 🏋️", callback_data: "add_10" },
+                        { text: "+20 🏋️", callback_data: "add_20" },
+                        { text: "+30 🏋️", callback_data: "add_30" }
+                    ],
+                    [
+                        { text: "⏳ 15 мин", callback_data: "snooze_15" },
+                        { text: "⏳ 30 мин", callback_data: "snooze_30" },
+                        { text: "⏳ 45 мин", callback_data: "snooze_45" },
+                        { text: "⏳ 1 час", callback_data: "snooze_60" }
+                    ]
+                ]
+            };
+            sendTelegramMessage(user.telegram_id, text, replyMarkup);
+            sentCount++;
+        }
+        res.json({ status: 'ok', sent: sentCount });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ status: 'error', error: e.message });
+    }
 });
 
-app.get('/api/stats', async (req, res) => {
-    if (!supabase) return res.json({ activeDates: [], rawData: [] });
-    const userId = String(req.query.user_id || 'guest');
-    const { data } = await supabase.from('pushups').select('created_at, count').eq('user_id', userId);
-    const activeDates = Array.from(new Set((data || []).map(r => new Date(r.created_at).toISOString().split('T')[0])));
-    res.json({ activeDates, rawData: data || [] });
-});
-
-app.get('/api/profile', async (req, res) => {
-    if (!supabase) return res.json({});
-    const userId = String(req.query.user_id || 'guest');
-    const { data } = await supabase.from('user_settings').select('*').eq('user_id', userId).maybeSingle();
-    res.json(data || {
-        daily_goal: 100,
-        reminder_start: '09:00',
-        reminder_end: '21:00',
-        notifications_enabled: true,
-        weight: 75,
-        height: 180,
-        target_weight: 70,
-        body_fat: 15
-    });
-});
-
-app.post('/api/profile', async (req, res) => {
-    if (!supabase) return res.status(500).json({ error: 'DB Error' });
-    const { user_id, ...settings } = req.body;
-    const { error } = await supabase.from('user_settings').upsert({ user_id: String(user_id || 'guest'), ...settings });
-    if (error) return res.status(500).json({ error: error.message });
-    res.json({ success: true });
-});
-
-// --- FRONTEND (iOS 19 GLASS UI) ---
-app.get('*', (req, res) => {
-    res.send(`
-<!DOCTYPE html>
+// Веб-приложение (Mini App)
+const HTML_PAGE = `<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>Fitness iOS 19 Glass</title>
+    <title>Fitness Tracker</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
-            --glass-bg: rgba(255, 255, 255, 0.08);
-            --glass-border: rgba(255, 255, 255, 0.18);
-            --glass-card: rgba(30, 41, 59, 0.55);
-            --accent-blue: #38bdf8;
+            --bg-color: #0b0e14;
+            --card-bg: #151b26;
+            --card-border: rgba(255, 255, 255, 0.08);
+            --input-bg: #1f2736;
+            --text-main: #ffffff;
+            --text-muted: #738194;
             --accent-green: #22c55e;
-            --accent-purple: #a855f7;
+            --accent-green-hover: #16a34a;
+            --accent-blue: #38bdf8;
+            --tab-inactive: #64748b;
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         }
 
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
-            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
             -webkit-tap-highlight-color: transparent;
-            touch-action: manipulation;
         }
-        
+
         body {
-            background: radial-gradient(circle at 50% -20%, #1e1b4b 0%, #0f172a 50%, #020617 100%);
-            background-attachment: fixed;
-            color: #f8fafc;
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(circle at 10% 0%, rgba(34, 197, 94, 0.12) 0%, transparent 40%),
+                radial-gradient(circle at 90% 10%, rgba(56, 189, 248, 0.1) 0%, transparent 40%);
+            color: var(--text-main);
+            font-family: var(--font-family);
             min-height: 100vh;
-            padding-top: calc(10px + env(safe-area-inset-top));
-            padding-bottom: calc(90px + env(safe-area-inset-bottom));
+            padding-bottom: calc(75px + env(safe-area-inset-bottom, 20px));
+            padding-top: env(safe-area-inset-top, 10px);
             overflow-x: hidden;
-            -webkit-font-smoothing: antialiased;
         }
 
-        /* Glass Header */
-        .header {
-            background: rgba(15, 23, 42, 0.65);
-            backdrop-filter: blur(25px) saturate(180%);
-            -webkit-backdrop-filter: blur(25px) saturate(180%);
-            border-bottom: 1px solid var(--glass-border);
-            padding: 16px 20px;
-            position: sticky;
-            top: 0;
-            z-index: 50;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .user-title { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
-
-        .tab-content { display: none; padding: 16px; max-width: 500px; margin: 0 auto; animation: fadeIn 0.25s ease-out; }
-        .tab-content.active { display: block; }
-
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-
-        /* Liquid Glass Cards */
-        .glass-card {
-            background: var(--glass-card);
-            backdrop-filter: blur(20px) saturate(160%);
-            -webkit-backdrop-filter: blur(20px) saturate(160%);
-            border: 1px solid var(--glass-border);
-            border-radius: 24px;
-            padding: 20px;
-            margin-bottom: 16px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-            will-change: transform;
+        .container {
+            max-width: 460px;
+            margin: 0 auto;
+            padding: 12px 16px;
         }
 
-        .card-label { font-size: 12px; text-transform: uppercase; color: #94a3b8; font-weight: 700; letter-spacing: 0.08em; margin-bottom: 12px; }
+        .screen { display: none; }
+        .screen.active { display: block; animation: fadeIn 0.2s ease-in-out; }
 
-        .counter-val { font-size: 56px; font-weight: 900; text-align: center; color: var(--accent-blue); text-shadow: 0 0 20px rgba(56, 189, 248, 0.4); margin: 10px 0; }
-
-        /* Glass Grids & Buttons */
-        .presets-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 16px 0; }
-        .btn-glass {
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            color: #fff;
-            padding: 14px;
-            border-radius: 16px;
-            font-size: 17px;
-            font-weight: 700;
-            cursor: pointer;
-            transition: transform 0.1s ease, background 0.15s ease;
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
         }
-        .btn-glass:active { transform: scale(0.94); background: rgba(255, 255, 255, 0.18); }
 
-        .btn-action {
-            width: 100%;
-            background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
-            border: none;
-            color: #fff;
-            padding: 18px;
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
             border-radius: 18px;
+            padding: 16px;
+            margin-bottom: 14px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+        }
+
+        .card-header-title {
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+
+        /* Top Streak Card */
+        .badge-card {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+        .badge-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #10b981 0%, #0ea5e9 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
             font-size: 18px;
             font-weight: 800;
-            box-shadow: 0 10px 25px rgba(34, 197, 94, 0.35);
-            cursor: pointer;
-            transition: transform 0.1s ease;
-        }
-        .btn-action:active { transform: scale(0.97); }
-
-        /* Athlete Profile Glass Card */
-        .profile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-        .profile-stat { background: rgba(15, 23, 42, 0.5); padding: 14px; border-radius: 16px; border: 1px solid var(--glass-border); text-align: center; }
-        .profile-stat-val { font-size: 22px; font-weight: 800; color: #38bdf8; }
-        .profile-stat-lbl { font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-top: 2px; }
-
-        /* Form Inputs */
-        .form-row { margin-bottom: 14px; }
-        .form-label { font-size: 12px; color: #94a3b8; display: block; margin-bottom: 6px; font-weight: 600; }
-        .form-input {
-            width: 100%;
-            background: rgba(15, 23, 42, 0.6);
-            border: 1px solid var(--glass-border);
             color: #fff;
+            box-shadow: 0 2px 10px rgba(16, 185, 129, 0.3);
+        }
+        .badge-info .subtitle {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.6px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+        .badge-info .title {
+            font-size: 18px;
+            font-weight: 800;
+            color: #fff;
+            margin-top: 2px;
+        }
+
+        /* Ring Chart */
+        .progress-content {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+        .ring-container {
+            position: relative;
+            width: 105px;
+            height: 105px;
+            flex-shrink: 0;
+        }
+        .ring-svg {
+            transform: rotate(-90deg);
+            width: 100%;
+            height: 100%;
+        }
+        .ring-bg {
+            stroke: rgba(255, 255, 255, 0.08);
+            stroke-width: 8;
+            fill: none;
+        }
+        .ring-fill {
+            stroke: url(#gradient);
+            stroke-width: 8;
+            fill: none;
+            stroke-linecap: round;
+            stroke-dasharray: 264;
+            stroke-dashoffset: 264;
+            transition: stroke-dashoffset 0.6s ease;
+        }
+        .ring-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 18px;
+            font-weight: 800;
+            color: #fff;
+        }
+        .stats-col { flex-grow: 1; }
+        .stat-block { margin-bottom: 10px; }
+        .stat-block:last-child { margin-bottom: 0; }
+        .stat-num-main {
+            font-size: 26px;
+            font-weight: 800;
+            color: #fff;
+            line-height: 1.1;
+        }
+        .stat-num-blue {
+            font-size: 22px;
+            font-weight: 800;
+            color: var(--accent-blue);
+            line-height: 1.1;
+        }
+        .stat-lbl {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        /* Quick Input */
+        .quick-buttons {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .btn-quick {
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            color: #fff;
+            font-size: 14px;
+            font-weight: 700;
+            padding: 10px 0;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .btn-quick:active {
+            transform: scale(0.95);
+            background: #2a3447;
+        }
+
+        .input-row {
+            display: flex;
+            gap: 10px;
+        }
+        .custom-input {
+            flex-grow: 1;
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 12px 14px;
+            color: #fff;
+            font-size: 15px;
+            outline: none;
+        }
+        .custom-input::placeholder { color: var(--text-muted); }
+
+        .btn-green {
+            background: var(--accent-green);
+            color: #fff;
+            border: none;
+            border-radius: 12px;
+            padding: 12px 20px;
+            font-size: 15px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.15s ease, transform 0.1s ease;
+            white-space: nowrap;
+        }
+        .btn-green:active {
+            background: var(--accent-green-hover);
+            transform: scale(0.98);
+        }
+        .btn-full {
+            width: 100%;
+            display: block;
+            margin-top: 14px;
             padding: 14px;
-            border-radius: 14px;
+            text-align: center;
+        }
+
+        /* Today Sets */
+        .sets-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .set-item {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 12px;
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .set-count {
             font-size: 16px;
+            font-weight: 800;
+            color: var(--accent-green);
+        }
+        .set-time {
+            font-size: 13px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .btn-del-set {
+            color: #ef4444;
+            background: none;
+            border: none;
+            font-size: 16px;
+            cursor: pointer;
+            padding: 0 4px;
+        }
+
+        /* Form Rows (Settings & Profile) */
+        .form-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .form-row:last-child { border-bottom: none; }
+        .form-label-box {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .form-label-main {
+            font-size: 15px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .form-label-sub {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        .form-input-sm {
+            width: 90px;
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            padding: 8px 10px;
+            color: #fff;
+            font-size: 15px;
+            font-weight: 600;
+            text-align: center;
+            outline: none;
+        }
+        .form-select-sm {
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            padding: 8px 12px;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 600;
+            outline: none;
+        }
+        .checkbox-toggle {
+            width: 26px;
+            height: 26px;
+            background: var(--accent-green);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            color: #fff;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        .checkbox-toggle.off {
+            background: var(--input-bg);
+            color: transparent;
+            border: 1px solid var(--card-border);
+        }
+        .time-range-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .time-input-sm {
+            width: 75px;
+            background: var(--input-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 6px;
+            color: #fff;
+            font-size: 13px;
+            text-align: center;
             outline: none;
         }
 
-        /* iOS Bottom Glass Navbar */
-        .navbar {
-            position: fixed;
-            bottom: 0; left: 0; right: 0;
-            background: rgba(15, 23, 42, 0.78);
-            backdrop-filter: blur(30px) saturate(200%);
-            -webkit-backdrop-filter: blur(30px) saturate(200%);
-            border-top: 1px solid var(--glass-border);
-            display: flex;
-            justify-content: space-around;
-            padding: 12px 0 calc(12px + env(safe-area-inset-bottom));
-            z-index: 100;
-        }
-        .nav-btn { background: none; border: none; color: #64748b; font-size: 11px; font-weight: 700; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; width: 25%; }
-        .nav-btn.active { color: var(--accent-blue); }
-        .nav-btn span { font-size: 20px; }
-
         /* Calendar Grid */
-        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; text-align: center; margin-top: 10px; }
-        .cal-day-name { font-size: 11px; color: #64748b; font-weight: 700; }
-        .cal-day { aspect-ratio: 1; border-radius: 10px; background: rgba(15, 23, 42, 0.4); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: #64748b; }
-        .cal-day.active { background: rgba(34, 197, 94, 0.25); color: #4ade80; border: 1px solid #22c55e; font-weight: 800; }
+        .calendar-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 6px;
+            text-align: center;
+            margin-top: 10px;
+        }
+        .cal-day-head {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-weight: 700;
+            padding-bottom: 6px;
+        }
+        .cal-day-cell {
+            aspect-ratio: 1;
+            background: var(--input-bg);
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .cal-day-cell.active-day {
+            background: rgba(34, 197, 94, 0.2);
+            border: 1px solid var(--accent-green);
+            color: var(--accent-green);
+        }
+
+        /* BMI Pill */
+        .bmi-box {
+            background: var(--input-bg);
+            border-radius: 12px;
+            padding: 14px;
+            text-align: center;
+            margin-top: 12px;
+        }
+        .bmi-value {
+            font-size: 24px;
+            font-weight: 800;
+            color: #fff;
+        }
+        .bmi-status {
+            display: inline-block;
+            margin-top: 6px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--accent-green);
+        }
+
+        /* Nav Bar */
+        .nav-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: calc(65px + env(safe-area-inset-bottom, 15px));
+            background: rgba(18, 24, 36, 0.94);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            display: flex;
+            align-items: center;
+            justify-content: space-around;
+            padding-bottom: env(safe-area-inset-bottom, 15px);
+            z-index: 999;
+        }
+        .nav-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            color: var(--tab-inactive);
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 20%;
+            transition: color 0.15s ease;
+        }
+        .nav-item svg { width: 22px; height: 22px; fill: currentColor; }
+        .nav-item.active { color: var(--accent-blue); }
     </style>
 </head>
 <body>
 
-    <div class="header">
-        <div class="user-title">⚡ <span id="username">Атлет</span></div>
-        <div style="font-size: 13px; color: var(--accent-blue); font-weight: 700;">Цель: <span id="headerGoal">100</span></div>
-    </div>
+<div class="container">
 
-    <!-- ТАБ: ЗАПИСЬ -->
-    <div id="tab-workout" class="tab-content active">
-        <div class="glass-card">
-            <div class="card-label">Новый подход</div>
-            <div class="counter-val" id="counter">0</div>
-            <div class="presets-grid">
-                <button class="btn-glass" onclick="addValue(10)">+10</button>
-                <button class="btn-glass" onclick="addValue(15)">+15</button>
-                <button class="btn-glass" onclick="addValue(20)">+20</button>
-                <button class="btn-glass" onclick="addValue(25)">+25</button>
-                <button class="btn-glass" onclick="addValue(30)">+30</button>
-                <button class="btn-glass" onclick="resetCounter()">Сброс</button>
+    <!-- ГЛАВНАЯ -->
+    <div id="screen-main" class="screen active">
+        
+        <div class="card badge-card">
+            <div class="badge-icon">1</div>
+            <div class="badge-info">
+                <div class="subtitle">IOS FITNESS TRACKER</div>
+                <div class="title" id="streak-days-text">13-й</div>
             </div>
-            <button class="btn-action" onclick="submitWorkout()">Сохранить подход</button>
         </div>
-    </div>
 
-    <!-- ТАБ: ПРОФИЛЬ / КАРТОЧКА СПОРТСМЕНА -->
-    <div id="tab-profile" class="tab-content">
-        <div class="glass-card">
-            <div class="card-label">Карточка Атлета (iOS Health)</div>
-            <div class="profile-grid">
-                <div class="profile-stat">
-                    <div class="profile-stat-val" id="profWeight">75 кг</div>
-                    <div class="profile-stat-lbl">Текущий вес</div>
+        <div class="card">
+            <div class="card-header-title">ДНЕВНОЙ ПРОГРЕСС</div>
+            <div class="progress-content">
+                <div class="ring-container">
+                    <svg class="ring-svg" viewBox="0 0 100 100">
+                        <defs>
+                            <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#22c55e" />
+                                <stop offset="100%" stop-color="#38bdf8" />
+                            </linearGradient>
+                        </defs>
+                        <circle class="ring-bg" cx="50" cy="50" r="42"></circle>
+                        <circle id="ring-progress" class="ring-fill" cx="50" cy="50" r="42"></circle>
+                    </svg>
+                    <div class="ring-text" id="ring-pct">100%</div>
                 </div>
-                <div class="profile-stat">
-                    <div class="profile-stat-val" id="profHeight">180 см</div>
-                    <div class="profile-stat-lbl">Рост</div>
-                </div>
-                <div class="profile-stat">
-                    <div class="profile-stat-val" id="profBmi">23.1</div>
-                    <div class="profile-stat-lbl">Индекс ИМТ</div>
-                </div>
-                <div class="profile-stat">
-                    <div class="profile-stat-val" id="profFat">15%</div>
-                    <div class="profile-stat-lbl">Процент жира</div>
+
+                <div class="stats-col">
+                    <div class="stat-block">
+                        <div class="stat-num-main"><span id="today-total">125</span> / <span id="target-goal">100</span></div>
+                        <div class="stat-lbl">Отжиманий сегодня</div>
+                    </div>
+                    <div class="stat-block">
+                        <div class="stat-num-blue" id="today-sets-count">4</div>
+                        <div class="stat-lbl">Выполнено подходов</div>
+                    </div>
                 </div>
             </div>
         </div>
 
-        <div class="glass-card">
-            <div class="card-label">Редактировать параметры</div>
-            <div class="form-row">
-                <label class="form-label">Вес (кг)</label>
-                <input type="number" id="editWeight" class="form-input" value="75">
+        <div class="card">
+            <div class="card-header-title">БЫСТРЫЙ ВВОД</div>
+            <div class="quick-buttons">
+                <div class="btn-quick" onclick="addQuick(15)">+15</div>
+                <div class="btn-quick" onclick="addQuick(20)">+20</div>
+                <div class="btn-quick" onclick="addQuick(25)">+25</div>
+                <div class="btn-quick" onclick="addQuick(30)">+30</div>
+                <div class="btn-quick" onclick="addQuick(35)">+35</div>
             </div>
-            <div class="form-row">
-                <label class="form-label">Рост (см)</label>
-                <input type="number" id="editHeight" class="form-input" value="180">
+            <div class="input-row">
+                <input type="number" id="custom-count-input" class="custom-input" placeholder="Введите своё число..." inputmode="numeric">
+                <button class="btn-green" onclick="submitCustomCount()">Записать</button>
             </div>
-            <div class="form-row">
-                <label class="form-label">Целевой вес (кг)</label>
-                <input type="number" id="editTargetWeight" class="form-input" value="70">
+        </div>
+
+        <div class="card">
+            <div class="card-header-title">СЕГОДНЯШНИЕ ПОДХОДЫ</div>
+            <div id="today-sets-list" class="sets-list"></div>
+        </div>
+
+    </div>
+
+    <!-- КАЛЕНДАРЬ -->
+    <div id="screen-calendar" class="screen">
+        <div class="card">
+            <div class="card-header-title" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>КАЛЕНДАРЬ ТРЕНИРОВОК</span>
+                <span id="cal-month-title" style="color:#fff; font-size:13px;"></span>
             </div>
-            <div class="form-row">
-                <label class="form-label">% жира в организме</label>
-                <input type="number" id="editFat" class="form-input" value="15">
-            </div>
-            <button class="btn-action" style="background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);" onclick="saveProfile()">Обновить профиль</button>
+            <div class="calendar-grid" id="calendar-grid-container"></div>
         </div>
     </div>
 
-    <!-- ТАБ: ПРОГРЕСС -->
-    <div id="tab-analytics" class="tab-content">
-        <div class="glass-card">
-            <div class="card-label">Динамика за 7 дней</div>
-            <canvas id="progressChart" height="180"></canvas>
-        </div>
-        <div class="glass-card">
-            <div class="card-label">Календарь активности</div>
-            <div class="calendar-grid" id="calendarGrid"></div>
+    <!-- ПРОГРЕСС -->
+    <div id="screen-progress" class="screen">
+        <div class="card">
+            <div class="card-header-title">СТАТИСТИКА ЗА 7 ДНЕЙ</div>
+            <div id="progress-bars-container" style="display:flex; align-items:flex-end; gap:8px; height:180px; padding-top:20px;"></div>
         </div>
     </div>
 
-    <!-- ТАБ: НАСТРОЙКИ -->
-    <div id="tab-settings" class="tab-content">
-        <div class="glass-card">
-            <div class="card-label">Уведомления и диапазон времени</div>
-            <div class="form-row">
-                <label class="form-label">Дневная цель (повторений)</label>
-                <input type="number" id="settingGoal" class="form-input" value="100">
-            </div>
-            <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                <div>
-                    <label class="form-label">Начало (С скольки)</label>
-                    <input type="time" id="settingStart" class="form-input" value="09:00">
-                </div>
-                <div>
-                    <label class="form-label">Конец (До скольки)</label>
-                    <input type="time" id="settingEnd" class="form-input" value="21:00">
-                </div>
-            </div>
-            <button class="btn-action" onclick="saveSettings()">Сохранить настройки</button>
-        </div>
-    </div>
-
-    <!-- NAVBAR -->
-    <div class="navbar">
-        <button class="nav-btn active" onclick="switchTab('workout', this)"><span>🏋️</span>Запись</button>
-        <button class="nav-btn" onclick="switchTab('profile', this)"><span>👤</span>Профиль</button>
-        <button class="nav-btn" onclick="switchTab('analytics', this)"><span>📊</span>Прогресс</button>
-        <button class="nav-btn" onclick="switchTab('settings', this)"><span>⚙️</span>Настройки</button>
-    </div>
-
-    <script>
-        var tg = window.Telegram ? window.Telegram.WebApp : null;
-        if (tg) { tg.expand(); tg.ready(); }
-
-        var userId = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) ? tg.initDataUnsafe.user.id : 'demo_user';
-        if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.first_name) {
-            document.getElementById('username').innerText = tg.initDataUnsafe.user.first_name;
-        }
-
-        var currentCount = 0;
-        var chartInstance = null;
-
-        function addValue(v) {
-            currentCount += v;
-            document.getElementById('counter').innerText = currentCount;
-            if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
-        }
-
-        function resetCounter() {
-            currentCount = 0;
-            document.getElementById('counter').innerText = '0';
-        }
-
-        function switchTab(tabId, btn) {
-            var tabs = document.querySelectorAll('.tab-content');
-            for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
-            var btns = document.querySelectorAll('.nav-btn');
-            for (var j = 0; j < btns.length; j++) btns[j].classList.remove('active');
+    <!-- ПРОФИЛЬ (КАРТОЧКА СПОРТСМЕНА) -->
+    <div id="screen-profile" class="screen">
+        <div class="card">
+            <div class="card-header-title">КАРТОЧКА СПОРТСМЕНА</div>
             
-            document.getElementById('tab-' + tabId).classList.add('active');
-            btn.classList.add('active');
+            <div class="form-row">
+                <div class="form-label-box">
+                    <div class="form-label-main">Текущий вес</div>
+                    <div class="form-label-sub">В килограммах</div>
+                </div>
+                <input type="number" id="prof-weight" class="form-input-sm" value="80" oninput="calcBMI()">
+            </div>
 
-            if (tabId === 'profile') loadProfile();
-            if (tabId === 'analytics') loadAnalytics();
-            if (tabId === 'settings') loadSettings();
-        }
+            <div class="form-row">
+                <div class="form-label-box">
+                    <div class="form-label-main">Рост</div>
+                    <div class="form-label-sub">В сантиметрах</div>
+                </div>
+                <input type="number" id="prof-height" class="form-input-sm" value="180" oninput="calcBMI()">
+            </div>
 
-        async function submitWorkout() {
-            if (currentCount <= 0) return alert('Укажите количество');
-            await fetch('/api/add', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, count: currentCount, exercise_type: 'pushups' })
+            <div class="form-row">
+                <div class="form-label-box">
+                    <div class="form-label-main">% Жира</div>
+                    <div class="form-label-sub">Опционально</div>
+                </div>
+                <input type="number" id="prof-fat" class="form-input-sm" value="18">
+            </div>
+
+            <div class="form-row">
+                <div class="form-label-box">
+                    <div class="form-label-main">Целевой вес</div>
+                    <div class="form-label-sub">К чему стремимся</div>
+                </div>
+                <input type="number" id="prof-target-weight" class="form-input-sm" value="75">
+            </div>
+
+            <div class="bmi-box">
+                <div style="font-size:12px; color:var(--text-muted);">Индекс массы тела (ИМТ)</div>
+                <div class="bmi-value" id="bmi-val">24.7</div>
+                <div class="bmi-status" id="bmi-status-label">Норма</div>
+            </div>
+
+            <button class="btn-green btn-full" onclick="saveProfileData()">Сохранить профиль</button>
+        </div>
+    </div>
+
+    <!-- НАСТРОЙКИ -->
+    <div id="screen-settings" class="screen">
+        <div class="card">
+            <div class="card-header-title">ПАРАМЕТРЫ ТРЕНИРОВОК</div>
+
+            <div class="form-row">
+                <div class="form-label-box">
+                    <div class="form-label-main">Дневная цель</div>
+                    <div class="form-label-sub">Количество отжиманий</div>
+                </div>
+                <input type="number" id="set-daily-goal" class="form-input-sm" value="100">
+            </div>
+
+            <div class="form-row">
+                <div class="form-label-box">
+                    <div class="form-label-main">Напоминания в Telegram</div>
+                    <div class="form-label-sub">Пуши от бота при паузе</div>
+                </div>
+                <div id="set-notif-toggle" class="checkbox-toggle" onclick="toggleNotif()">✓</div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-label-box">
+                    <div class="form-label-main">Интервал уведомлений</div>
+                    <div class="form-label-sub">Частота отправки сообщений</div>
+                </div>
+                <select id="set-interval" class="form-select-sm">
+                    <option value="1">Каждый час</option>
+                    <option value="2">Каждые 2 часа</option>
+                    <option value="3" selected>Каждые 3 часа</option>
+                    <option value="4">Каждые 4 часа</option>
+                </select>
+            </div>
+
+            <div class="form-row">
+                <div class="form-label-box">
+                    <div class="form-label-main">Диапазон времени</div>
+                    <div class="form-label-sub">Со скольки и до скольки отправлять</div>
+                </div>
+                <div class="time-range-group">
+                    <input type="time" id="set-time-start" class="time-input-sm" value="09:00">
+                    <span style="font-size:12px; color:var(--text-muted);">—</span>
+                    <input type="time" id="set-time-end" class="time-input-sm" value="22:00">
+                </div>
+            </div>
+
+            <button class="btn-green btn-full" onclick="saveSettingsData()">Сохранить настройки</button>
+        </div>
+    </div>
+
+</div>
+
+<!-- Нибижняя панель навигации -->
+<div class="nav-bar">
+    <div class="nav-item active" onclick="switchTab('main')">
+        <svg viewBox="0 0 24 24"><path d="M3 13h4v8H3zm7-8h4v16h-4zm7 4h4v12h-4z"/></svg>
+        <span>Главная</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('calendar')">
+        <svg viewBox="0 0 24 24"><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zm0-12H5V6h14v2z"/></svg>
+        <span>Календарь</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('progress')">
+        <svg viewBox="0 0 24 24"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
+        <span>Прогресс</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('profile')">
+        <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+        <span>Профиль</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('settings')">
+        <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6-3.6 3.6z"/></svg>
+        <span>Настройки</span>
+    </div>
+</div>
+
+<script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+        tg.ready();
+        tg.expand();
+    }
+
+    let state = {
+        dailyGoal: 100,
+        notifEnabled: true,
+        notifInterval: 3,
+        timeStart: "09:00",
+        timeEnd: "22:00",
+        weight: 80,
+        height: 180,
+        fat: 18,
+        targetWeight: 75,
+        todaySets: [
+            { count: 35, time: "20:35" },
+            { count: 30, time: "20:33" },
+            { count: 30, time: "20:33" },
+            { count: 30, time: "20:33" }
+        ]
+    };
+
+    function triggerHaptic() {
+        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+    }
+
+    function switchTab(tabName) {
+        triggerHaptic();
+        const screens = ['main', 'calendar', 'progress', 'profile', 'settings'];
+        const navItems = document.querySelectorAll('.nav-item');
+
+        screens.forEach((s, idx) => {
+            const el = document.getElementById('screen-' + s);
+            if (s === tabName) {
+                el.classList.add('active');
+                navItems[idx].classList.add('active');
+            } else {
+                el.classList.remove('active');
+                navItems[idx].classList.remove('active');
+            }
+        });
+
+        if (tabName === 'calendar') renderCalendar();
+        if (tabName === 'progress') renderProgressChart();
+    }
+
+    function updateProgressUI() {
+        const total = state.todaySets.reduce((a, b) => a + b.count, 0);
+        document.getElementById('today-total').innerText = total;
+        document.getElementById('target-goal').innerText = state.dailyGoal;
+        document.getElementById('today-sets-count').innerText = state.todaySets.length;
+
+        const pct = Math.min(100, Math.round((total / state.dailyGoal) * 100)) || 0;
+        document.getElementById('ring-pct').innerText = pct + '%';
+
+        const circle = document.getElementById('ring-progress');
+        const circumference = 2 * Math.PI * 42;
+        const offset = circumference - (pct / 100) * circumference;
+        circle.style.strokeDashoffset = offset;
+
+        const listEl = document.getElementById('today-sets-list');
+        listEl.innerHTML = '';
+        if (state.todaySets.length === 0) {
+            listEl.innerHTML = '<div style="color:var(--text-muted); font-size:13px; text-align:center; padding:10px;">Подходов пока нет</div>';
+        } else {
+            state.todaySets.forEach((item, index) => {
+                const div = document.createElement('div');
+                div.className = 'set-item';
+                div.innerHTML = '<span class="set-count">+' + item.count + '</span>' +
+                                '<div class="set-time">' +
+                                    '<span>' + item.time + '</span>' +
+                                    '<button class="btn-del-set" onclick="deleteSet(' + index + ')">✕</button>' +
+                                '</div>';
+                listEl.appendChild(div);
             });
-            if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-            resetCounter();
-            alert('Подход успешно зафиксирован!');
         }
+    }
 
-        async function loadProfile() {
-            var res = await fetch('/api/profile?user_id=' + userId);
-            var p = await res.json();
+    function addQuick(num) {
+        triggerHaptic();
+        addPushups(num);
+    }
+
+    function submitCustomCount() {
+        const input = document.getElementById('custom-count-input');
+        const val = parseInt(input.value);
+        if (val > 0) {
+            triggerHaptic();
+            addPushups(val);
+            input.value = '';
+        }
+    }
+
+    function addPushups(count) {
+        const now = new Date();
+        const timeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+        state.todaySets.unshift({ count: count, time: timeStr });
+        updateProgressUI();
+    }
+
+    function deleteSet(index) {
+        triggerHaptic();
+        state.todaySets.splice(index, 1);
+        updateProgressUI();
+    }
+
+    function toggleNotif() {
+        triggerHaptic();
+        state.notifEnabled = !state.notifEnabled;
+        const toggle = document.getElementById('set-notif-toggle');
+        if (state.notifEnabled) {
+            toggle.classList.remove('off');
+            toggle.innerText = '✓';
+        } else {
+            toggle.classList.add('off');
+            toggle.innerText = '';
+        }
+    }
+
+    function calcBMI() {
+        const w = parseFloat(document.getElementById('prof-weight').value) || 0;
+        const h = (parseFloat(document.getElementById('prof-height').value) || 0) / 100;
+        if (w > 0 && h > 0) {
+            const bmi = (w / (h * h)).toFixed(1);
+            document.getElementById('bmi-val').innerText = bmi;
+            const statusEl = document.getElementById('bmi-status-label');
+            if (bmi < 18.5) {
+                statusEl.innerText = 'Дефицит массы';
+                statusEl.style.color = '#38bdf8';
+            } else if (bmi < 25) {
+                statusEl.innerText = 'Норма';
+                statusEl.style.color = '#22c55e';
+            } else if (bmi < 30) {
+                statusEl.innerText = 'Избыточный вес';
+                statusEl.style.color = '#f59e0b';
+            } else {
+                statusEl.innerText = 'Ожирение';
+                statusEl.style.color = '#ef4444';
+            }
+        }
+    }
+
+    function saveSettingsData() {
+        triggerHaptic();
+        state.dailyGoal = parseInt(document.getElementById('set-daily-goal').value) || 100;
+        state.notifInterval = parseInt(document.getElementById('set-interval').value) || 3;
+        state.timeStart = document.getElementById('set-time-start').value || "09:00";
+        state.timeEnd = document.getElementById('set-time-end').value || "22:00";
+        updateProgressUI();
+        if (tg) tg.showAlert("Настройки успешно сохранены!");
+    }
+
+    function saveProfileData() {
+        triggerHaptic();
+        if (tg) tg.showAlert("Карточка спортсмена обновлена!");
+    }
+
+    function renderCalendar() {
+        const container = document.getElementById('calendar-grid-container');
+        container.innerHTML = '';
+        const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+        dayNames.forEach(d => {
+            const head = document.createElement('div');
+            head.className = 'cal-day-head';
+            head.innerText = d;
+            container.appendChild(head);
+        });
+
+        const now = new Date();
+        document.getElementById('cal-month-title').innerText = now.toLocaleString('ru', { month: 'long', year: 'numeric' });
+
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        for (let i = 1; i <= daysInMonth; i++) {
+            const cell = document.createElement('div');
+            cell.className = 'cal-day-cell';
+            if (i === now.getDate()) {
+                cell.classList.add('active-day');
+                const total = state.todaySets.reduce((a, b) => a + b.count, 0);
+                cell.innerHTML = '<span>' + i + '</span>' + (total > 0 ? '<span style="font-size:9px; font-weight:800;">' + total + '</span>' : '');
+            } else {
+                cell.innerHTML = '<span>' + i + '</span>';
+            }
+            container.appendChild(cell);
+        }
+    }
+
+    function renderProgressChart() {
+        const container = document.getElementById('progress-bars-container');
+        container.innerHTML = '';
+        const days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+        const todayIdx = (new Date().getDay() + 6) % 7;
+
+        days.forEach((day, idx) => {
+            const col = document.createElement('div');
+            col.style.cssText = 'flex:1; display:flex; flex-direction:column; align-items:center; gap:6px; height:100%; justify-content:flex-end;';
             
-            document.getElementById('profWeight').innerText = (p.weight || 75) + ' кг';
-            document.getElementById('profHeight').innerText = (p.height || 180) + ' см';
-            document.getElementById('profFat').innerText = (p.body_fat || 15) + '%';
-            
-            var hM = (p.height || 180) / 100;
-            var bmi = ((p.weight || 75) / (hM * hM)).toFixed(1);
-            document.getElementById('profBmi').innerText = bmi;
+            let val = (idx === todayIdx) ? state.todaySets.reduce((a, b) => a + b.count, 0) : Math.floor(Math.random() * 80 + 20);
+            let pct = Math.min(100, Math.round((val / state.dailyGoal) * 100));
 
-            document.getElementById('editWeight').value = p.weight || 75;
-            document.getElementById('editHeight').value = p.height || 180;
-            document.getElementById('editTargetWeight').value = p.target_weight || 70;
-            document.getElementById('editFat').value = p.body_fat || 15;
-        }
+            const bar = document.createElement('div');
+            bar.style.cssText = 'width:100%; border-radius:6px; background:' + (idx === todayIdx ? 'var(--accent-green)' : 'var(--input-bg)') + '; height:' + Math.max(8, pct) + '%; transition:height 0.3s ease;';
 
-        async function saveProfile() {
-            var weight = parseFloat(document.getElementById('editWeight').value);
-            var height = parseFloat(document.getElementById('editHeight').value);
-            var target_weight = parseFloat(document.getElementById('editTargetWeight').value);
-            var body_fat = parseFloat(document.getElementById('editFat').value);
+            const lbl = document.createElement('div');
+            lbl.style.cssText = 'font-size:11px; color:var(--text-muted);';
+            lbl.innerText = day;
 
-            await fetch('/api/profile', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, weight: weight, height: height, target_weight: target_weight, body_fat: body_fat })
-            });
-            alert('Карточка атлета обновлена!');
-            loadProfile();
-        }
+            col.appendChild(bar);
+            col.appendChild(lbl);
+            container.appendChild(col);
+        });
+    }
 
-        async function loadAnalytics() {
-            var res = await fetch('/api/stats?user_id=' + userId);
-            var data = await res.json();
-            renderCalendar(data.activeDates || []);
-            renderChart(data.rawData || []);
-        }
-
-        function renderCalendar(activeDates) {
-            var calGrid = document.getElementById('calendarGrid');
-            var now = new Date();
-            var year = now.getFullYear();
-            var month = now.getMonth();
-            var daysInMonth = new Date(year, month + 1, 0).getDate();
-
-            var dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-            var html = '';
-            for (var i = 0; i < dayNames.length; i++) {
-                html += '<div class="cal-day-name">' + dayNames[i] + '</div>';
-            }
-
-            for (var day = 1; day <= daysInMonth; day++) {
-                var mStr = String(month + 1).padStart(2, '0');
-                var dStr = String(day).padStart(2, '0');
-                var dateStr = year + '-' + mStr + '-' + dStr;
-                var isActive = activeDates.indexOf(dateStr) !== -1 ? 'active' : '';
-                html += '<div class="cal-day ' + isActive + '">' + day + '</div>';
-            }
-            calGrid.innerHTML = html;
-        }
-
-        function renderChart(rawData) {
-            var ctx = document.getElementById('progressChart').getContext('2d');
-            var labels = [];
-            var values = [];
-
-            for (var i = 6; i >= 0; i--) {
-                var d = new Date();
-                d.setDate(d.getDate() - i);
-                var dateStr = d.toISOString().split('T')[0];
-                labels.push(d.toLocaleDateString('ru', { weekday: 'short' }));
-                
-                var sum = 0;
-                for (var j = 0; j < rawData.length; j++) {
-                    if (rawData[j].created_at && rawData[j].created_at.startsWith(dateStr)) {
-                        sum += rawData[j].count;
-                    }
-                }
-                values.push(sum);
-            }
-
-            if (chartInstance) chartInstance.destroy();
-            chartInstance = new Chart(ctx, {
-                type: 'bar',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        label: 'Повторения',
-                        data: values,
-                        backgroundColor: '#38bdf8',
-                        borderRadius: 8
-                    }]
-                },
-                options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
-            });
-        }
-
-        async function loadSettings() {
-            var res = await fetch('/api/profile?user_id=' + userId);
-            var settings = await res.json();
-            document.getElementById('settingGoal').value = settings.daily_goal || 100;
-            document.getElementById('settingStart').value = settings.reminder_start || '09:00';
-            document.getElementById('settingEnd').value = settings.reminder_end || '21:00';
-            document.getElementById('headerGoal').innerText = settings.daily_goal || 100;
-        }
-
-        async function saveSettings() {
-            var goal = parseInt(document.getElementById('settingGoal').value);
-            var start = document.getElementById('settingStart').value;
-            var end = document.getElementById('settingEnd').value;
-
-            await fetch('/api/profile', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    user_id: userId,
-                    daily_goal: goal,
-                    reminder_start: start,
-                    reminder_end: end
-                })
-            });
-
-            document.getElementById('headerGoal').innerText = goal;
-            alert('Настройки сохранены!');
-        }
-
-        loadSettings();
-    </script>
+    updateProgressUI();
+    calcBMI();
+</script>
 </body>
-</html>
-    `);
+</html>`;
+
+app.get('/', (req, res) => {
+    res.send(HTML_PAGE);
 });
 
-app.listen(port, () => console.log('Сервер запущен на порту ' + port));
+app.listen(port, () => {
+    console.log('Server is running on port ' + port);
+});
