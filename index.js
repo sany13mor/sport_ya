@@ -53,8 +53,6 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
 
 // 1. Загрузка данных пользователя (с лимитом для предотвращения зависаний)
 app.get('/api/user-data', async (req, res) => {
-    // Внимание для продакшена: req.query.telegram_id небезопасен. 
-    // В идеале нужно передавать Telegram initData и валидировать его через BOT_TOKEN.
     const telegramId = String(req.query.telegram_id || 'demo_user');
 
     if (!supabase) {
@@ -694,6 +692,14 @@ const HTML_PAGE = `<!DOCTYPE html>
         pushupsHistory: []
     };
 
+    // ИСПРАВЛЕННАЯ ФУНКЦИЯ: вытаскивает только ДАТУ (без времени)
+    function getDateOnly(dateString) {
+        const d = new Date(dateString);
+        return d.getFullYear() + '-' + 
+               String(d.getMonth() + 1).padStart(2, '0') + '-' + 
+               String(d.getDate()).padStart(2, '0');
+    }
+
     function formatDateLocal(d) {
         const dateObj = new Date(d);
         const y = dateObj.getFullYear();
@@ -786,9 +792,10 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
     }
 
+    // ИСПРАВЛЕНО: теперь сравниваем только даты (игнорируя часы/минуты/секунды)
     function getTodaySets() {
-        const todayStr = formatDateLocal(new Date());
-        return state.pushupsHistory.filter(item => formatDateLocal(item.created_at) === todayStr);
+        const todayStr = getDateOnly(new Date());
+        return state.pushupsHistory.filter(item => getDateOnly(item.created_at) === todayStr);
     }
 
     function updateProgressUI() {
@@ -984,7 +991,6 @@ const HTML_PAGE = `<!DOCTYPE html>
 
         const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
         
-        // ВЫЧИСЛЕНИЕ ПУСТЫХ ЯЧЕЕК ПЕРЕД НАЧАЛОМ МЕСЯЦА (фикс съехавших дней недели)
         const firstDayIndex = new Date(now.getFullYear(), now.getMonth(), 1).getDay();
         const emptyCells = (firstDayIndex + 6) % 7;
 
@@ -998,9 +1004,11 @@ const HTML_PAGE = `<!DOCTYPE html>
             cell.className = 'cal-day-cell';
             
             const cellDate = new Date(now.getFullYear(), now.getMonth(), i);
-            const dayDateStr = formatDateLocal(cellDate);
+            const dayDateStr = getDateOnly(cellDate);
+            
+            // ИСПРАВЛЕНО: используем getDateOnly
             const dayTotal = state.pushupsHistory
-                .filter(item => formatDateLocal(item.created_at) === dayDateStr)
+                .filter(item => getDateOnly(item.created_at) === dayDateStr)
                 .reduce((a, b) => a + b.count, 0);
 
             if (dayTotal > 0) {
@@ -1025,10 +1033,11 @@ const HTML_PAGE = `<!DOCTYPE html>
             const diff = i - currentDayOfWeek;
             const targetDate = new Date();
             targetDate.setDate(now.getDate() + diff);
-            const dateStr = formatDateLocal(targetDate);
+            const dateStr = getDateOnly(targetDate);
 
+            // ИСПРАВЛЕНО: используем getDateOnly
             const dayTotal = state.pushupsHistory
-                .filter(item => formatDateLocal(item.created_at) === dateStr)
+                .filter(item => getDateOnly(item.created_at) === dateStr)
                 .reduce((a, b) => a + b.count, 0);
 
             let pct = Math.min(100, Math.round((dayTotal / state.dailyGoal) * 100));
