@@ -1,37 +1,20 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const { createClient } = require('@supabase/supabase-js');
 const https = require('https');
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Переменные окружения (добавьте их в Render Environment Variables)
+const SUPABASE_URL = process.env.SUPABASE_URL || 'YOUR_SUPABASE_URL';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'YOUR_SUPABASE_KEY';
 const BOT_TOKEN = process.env.BOT_TOKEN || 'YOUR_TELEGRAM_BOT_TOKEN';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 app.use(express.json());
 
-// --- БАЗА ДАННЫХ ---
-const db = new sqlite3.Database('./database.db', (err) => {
-    if (err) console.error('Ошибка БД:', err.message);
-    else console.log('SQLite подключена.');
-});
-
-db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS workouts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        count INTEGER,
-        exercise TEXT DEFAULT 'pushups',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS user_settings (
-        user_id TEXT PRIMARY KEY,
-        daily_goal INTEGER DEFAULT 100,
-        reminder_time TEXT DEFAULT '20:00',
-        notifications_enabled INTEGER DEFAULT 1
-    )`);
-});
-
-// --- СЕРВИС УВЕДОМЛЕНИЙ ---
+// --- ОТПРАВКА УВЕДОМЛЕНИЙ В TELEGRAM ---
 function sendTelegramMessage(chatId, text) {
     if (!BOT_TOKEN || BOT_TOKEN === 'YOUR_TELEGRAM_BOT_TOKEN') return;
     const data = JSON.stringify({ chat_id: chatId, text: text, parse_mode: 'HTML' });
@@ -46,111 +29,122 @@ function sendTelegramMessage(chatId, text) {
     req.end();
 }
 
-setInterval(() => {
+// Проверка напоминаний каждую минуту
+setInterval(async () => {
     const now = new Date();
     const hours = String(now.getHours()).padStart(2, '0');
     const minutes = String(now.getMinutes()).padStart(2, '0');
     const currentTime = hours + ':' + minutes;
 
-    db.all(
-        `SELECT user_id, daily_goal FROM user_settings WHERE reminder_time = ? AND notifications_enabled = 1`,
-        [currentTime],
-        (err, rows) => {
-            if (err || !rows) return;
-            rows.forEach(user => {
+    try {
+        const { data: users, error } = await supabase
+            .from('user_settings')
+            .select('user_id, daily_goal')
+            .eq('reminder_time', currentTime)
+            .eq('notifications_enabled', true);
+
+        if (!error && users) {
+            users.forEach(user => {
                 const msg = '🏋️ <b>Время тренировки!</b>\nПора отжаться. Твоя дневная цель: <b>' + user.daily_goal + '</b> повторений.';
                 sendTelegramMessage(user.user_id, msg);
             });
         }
-    );
+    } catch (e) {
+        console.error('Ошибка проверки напоминаний:', e);
+    }
 }, 60000);
 
 // --- API ENDPOINTS ---
 
-app.post('/api/add', (req, res) => {
-    const { user_id, count, exercise } = req.body;
+// Сохранение подхода в таблицу pushups
+app.post('/api/add', async (req, res) => {
+    const { user_id, count, exercise_type } = req.body;
     if (!count || count <= 0) return res.status(400).json({ error: 'Некорректное значение' });
 
-    db.run(
-        `INSERT INTO workouts (user_id, count, exercise) VALUES (?, ?, ?)`,
-        [String(user_id || 'guest'), count, exercise || 'pushups'],
-        function (err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ success: true, id: this.lastID });
-        }
-    );
+    const { data, error } = await supabase
+        .from('pushups')
+        .insert([{
+            user_id: String(user_id || 'guest'),
+            count: parseInt(count),
+            exercise_type: exercise_type || 'pushups'
+        }])
+        .select();
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, data });
 });
 
-app.get('/api/stats', (req, res) => {
+// Получение данных для календаря и графика
+app.get('/api/stats', async (req, res) => {
     const userId = String(req.query.user_id || 'guest');
 
-    db.all(
-        `SELECT DISTINCT DATE(created_at, 'localtime') as date FROM workouts WHERE user_id = ?`,
-        [userId],
-        (err, activeRows) => {
-            if (err) return res.status(500).json({ error: err.message });
-            const activeDates = activeRows.map(r => r.date);
+    const { data, error } = await supabase
+        .from('pushups')
+        .select('created_at, count')
+        .eq('user_id', userId);
 
-            db.all(
-                `SELECT DATE(created_at, 'localtime') as date, SUM(count) as total 
-                 FROM workouts 
-                 WHERE user_id = ? AND created_at >= DATE('now', '-6 days', 'localtime')
-                 GROUP BY DATE(created_at, 'localtime')`,
-                [userId],
-                (err, chartRows) => {
-                    if (err) return res.status(500).json({ error: err.message });
-                    res.json({ activeDates: activeDates, chartData: chartRows });
-                }
-            );
-        }
-    );
+    if (error) return res.status(500).json({ error: error.message });
+
+    const activeDates = Array.from(new Set(
+        (data || []).map(r => new Date(r.created_at).toISOString().split('T')[0])
+    ));
+
+    res.json({ activeDates, rawData: data || [] });
 });
 
-app.get('/api/history', (req, res) => {
+// История подходов
+app.get('/api/history', async (req, res) => {
     const userId = String(req.query.user_id || 'guest');
-    db.all(
-        `SELECT id, count, exercise, created_at FROM workouts WHERE user_id = ? ORDER BY created_at DESC`,
-        [userId],
-        (err, rows) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ history: rows });
-        }
-    );
+    const { data, error } = await supabase
+        .from('pushups')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ history: data || [] });
 });
 
-app.delete('/api/delete/:id', (req, res) => {
-    db.run(`DELETE FROM workouts WHERE id = ?`, [req.params.id], function (err) {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ success: true });
-    });
+// Удаление подхода
+app.delete('/api/delete/:id', async (req, res) => {
+    const { error } = await supabase
+        .from('pushups')
+        .delete()
+        .eq('id', req.params.id);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
 });
 
-app.get('/api/settings', (req, res) => {
+// Настройки
+app.get('/api/settings', async (req, res) => {
     const userId = String(req.query.user_id || 'guest');
-    db.get(`SELECT * FROM user_settings WHERE user_id = ?`, [userId], (err, row) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(row || { daily_goal: 100, reminder_time: '20:00', notifications_enabled: 1 });
-    });
+    const { data, error } = await supabase
+        .from('user_settings')
+        .select('*')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data || { daily_goal: 100, reminder_time: '20:00', notifications_enabled: true });
 });
 
-app.post('/api/settings', (req, res) => {
+app.post('/api/settings', async (req, res) => {
     const { user_id, daily_goal, reminder_time, notifications_enabled } = req.body;
-    db.run(
-        `INSERT INTO user_settings (user_id, daily_goal, reminder_time, notifications_enabled) 
-         VALUES (?, ?, ?, ?) 
-         ON CONFLICT(user_id) DO UPDATE SET 
-            daily_goal = excluded.daily_goal,
-            reminder_time = excluded.reminder_time,
-            notifications_enabled = excluded.notifications_enabled`,
-        [String(user_id || 'guest'), daily_goal, reminder_time, notifications_enabled ? 1 : 0],
-        function (err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ success: true });
-        }
-    );
+    const { error } = await supabase
+        .from('user_settings')
+        .upsert({
+            user_id: String(user_id || 'guest'),
+            daily_goal: parseInt(daily_goal),
+            reminder_time: reminder_time,
+            notifications_enabled: Boolean(notifications_enabled)
+        });
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
 });
 
-// --- ФРОНТЕНД ---
+// --- ФРОНТЕНД WEBAPP ---
 app.get('*', (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -232,7 +226,7 @@ app.get('*', (req, res) => {
         </div>
 
         <div class="card">
-            <div class="card-title" id="calendarTitle">Календарь активности</div>
+            <div class="card-title">Календарь активности</div>
             <div class="calendar-grid" id="calendarGrid"></div>
         </div>
     </div>
@@ -245,7 +239,7 @@ app.get('*', (req, res) => {
         </div>
     </div>
 
-    <!-- НАСТРОЙКИ УВЕДОМЛЕНИЙ -->
+    <!-- НАСТРОЙКИ -->
     <div id="tab-settings" class="tab-content">
         <div class="card">
             <div class="card-title">Настройки и Напоминания</div>
@@ -311,7 +305,7 @@ app.get('*', (req, res) => {
             await fetch('/api/add', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, count: currentCount, exercise: 'pushups' })
+                body: JSON.stringify({ user_id: userId, count: currentCount, exercise_type: 'pushups' })
             });
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
             resetCounter();
@@ -322,7 +316,7 @@ app.get('*', (req, res) => {
             const res = await fetch('/api/stats?user_id=' + userId);
             const data = await res.json();
             renderCalendar(data.activeDates || []);
-            renderChart(data.chartData || []);
+            renderChart(data.rawData || []);
         }
 
         function renderCalendar(activeDates) {
@@ -347,7 +341,7 @@ app.get('*', (req, res) => {
             calGrid.innerHTML = html;
         }
 
-        function renderChart(chartData) {
+        function renderChart(rawData) {
             const ctx = document.getElementById('progressChart').getContext('2d');
             
             const labels = [];
@@ -358,8 +352,11 @@ app.get('*', (req, res) => {
                 const dateStr = d.toISOString().split('T')[0];
                 labels.push(d.toLocaleDateString('ru', { weekday: 'short', day: 'numeric' }));
                 
-                const found = chartData.find(function(item) { return item.date === dateStr; });
-                values.push(found ? found.total : 0);
+                const sum = rawData
+                    .filter(function(item) { return item.created_at.startsWith(dateStr); })
+                    .reduce(function(acc, curr) { return acc + curr.count; }, 0);
+
+                values.push(sum);
             }
 
             if (chartInstance) chartInstance.destroy();
@@ -391,7 +388,7 @@ app.get('*', (req, res) => {
             container.innerHTML = data.history.map(function(item) {
                 return '<div class="history-item">' +
                     '<div>' +
-                        '<div style="font-weight:600;">Отжимания</div>' +
+                        '<div style="font-weight:600;">' + (item.exercise_type || 'Отжимания') + '</div>' +
                         '<div class="history-date">' + new Date(item.created_at).toLocaleString('ru') + '</div>' +
                     '</div>' +
                     '<div style="display:flex; align-items:center; gap:10px;">' +
@@ -412,7 +409,7 @@ app.get('*', (req, res) => {
             const settings = await res.json();
             document.getElementById('settingGoal').value = settings.daily_goal || 100;
             document.getElementById('settingTime').value = settings.reminder_time || '20:00';
-            document.getElementById('settingNotify').checked = settings.notifications_enabled === 1;
+            document.getElementById('settingNotify').checked = settings.notifications_enabled !== false;
             document.getElementById('headerGoal').innerText = settings.daily_goal || 100;
         }
 
