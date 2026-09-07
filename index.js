@@ -20,6 +20,15 @@ const inMemoryStore = {
     pushups: []
 };
 
+// Вспомогательная функция для безопасного преобразования telegram_id (поддержка браузера и Telegram)
+function parseTelegramId(rawId) {
+    if (!rawId || rawId === 'demo_user') {
+        return 356582454; // Дефолтный ID для тестов в браузере
+    }
+    const parsed = parseInt(rawId);
+    return isNaN(parsed) ? 356582454 : parsed;
+}
+
 async function sendTelegramMessage(chatId, text, replyMarkup) {
     if (!BOT_TOKEN) return;
     try {
@@ -38,8 +47,8 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
 
 app.get('/api/user-data', async (req, res) => {
     const telegramIdRaw = req.query.telegram_id || 'demo_user';
-    const userIdInt = parseInt(telegramIdRaw) || 0;
-    const userIdStr = String(telegramIdRaw);
+    const userIdInt = parseTelegramId(telegramIdRaw);
+    const userIdStr = String(userIdInt);
     
     if (!supabase) {
         return res.json({
@@ -85,7 +94,7 @@ app.get('/api/user-data', async (req, res) => {
 
 app.post('/api/add-pushup', async (req, res) => {
     const { telegram_id, count } = req.body;
-    const userId = parseInt(telegram_id || 0);
+    const userId = parseTelegramId(telegram_id);
     const cnt = parseInt(count);
 
     if (!cnt || cnt <= 0 || !userId) {
@@ -119,7 +128,7 @@ app.post('/api/add-pushup', async (req, res) => {
 
 app.post('/api/delete-pushup', async (req, res) => {
     const { id, telegram_id } = req.body;
-    const userId = parseInt(telegram_id || 0);
+    const userId = parseTelegramId(telegram_id);
 
     if (!id || !userId) return res.status(400).json({ status: 'error', message: 'Invalid ID' });
 
@@ -140,7 +149,7 @@ app.post('/api/delete-pushup', async (req, res) => {
 
 app.post('/api/save-settings', async (req, res) => {
     const { telegram_id, daily_goal, notifications_enabled, notification_interval, time_start, time_end } = req.body;
-    const userId = String(telegram_id || 'demo_user');
+    const userId = String(parseTelegramId(telegram_id));
 
     const settingsObj = {
         user_id: userId,
@@ -166,7 +175,7 @@ app.post('/api/save-settings', async (req, res) => {
 
 app.post('/api/save-profile', async (req, res) => {
     const { telegram_id, weight, height, fat, target_weight } = req.body;
-    const userId = String(telegram_id || 'demo_user');
+    const userId = String(parseTelegramId(telegram_id));
 
     const profileObj = {
         user_id: userId,
@@ -760,7 +769,7 @@ const HTML_PAGE = `<!DOCTYPE html>
     const tg = window.Telegram?.WebApp;
     if (tg) { tg.ready(); tg.expand(); }
 
-    const telegramId = tg?.initDataUnsafe?.user?.id || "demo_user";
+    const telegramId = tg?.initDataUnsafe?.user?.id || 356582454;
 
     let state = {
         dailyGoal: 100,
@@ -838,7 +847,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         });
         const total = todaySets.reduce(function(a, b) { return a + b.count; }, 0);
 
-        document.getElementById('today-total-uiinnerHTMLHtml' || 'today-total-ui').innerHTML = total + ' <span style="font-size: 14px; color: var(--text-secondary); font-weight: 500;">/ ' + state.dailyGoal + '</span>';
+        document.getElementById('today-total-ui').innerHTML = total + ' <span style="font-size: 14px; color: var(--text-secondary); font-weight: 500;">/ ' + state.dailyGoal + '</span>';
         document.getElementById('today-sets-count-ui').innerText = todaySets.length;
 
         const pct = Math.min(100, Math.round((total / state.dailyGoal) * 100)) || 0;
@@ -861,7 +870,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                     '<span style="color: var(--accent-green); font-size: 16px; font-weight: 800;">+' + item.count + '</span>' +
                     '<div style="display: flex; gap: 12px; align-items: center;">' +
                         '<span style="color: var(--text-secondary); font-size: 14px;">' + timeStr + '</span>' +
-                        '<button style="background: none; border: none; color: #555; padding: 4px; font-size: 16px;" onclick="deleteSet(' + item.id + ')">✕</button>' +
+                        '<button style="background: none; border: none; color: #555; padding: 4px; font-size: 16px;" onclick="deleteSet(\'' + item.id + '\')">✕</button>' +
                     '</div>' +
                 '</div>';
             });
@@ -913,7 +922,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     async function deleteSet(id) {
         triggerHaptic();
-        state.pushupsHistory = state.pushupsHistory.filter(function(i) { return i.id !== id; });
+        state.pushupsHistory = state.pushupsHistory.filter(function(i) { return String(i.id) !== String(id); });
         updateProgressUI();
 
         try {
