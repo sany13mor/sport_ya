@@ -20,31 +20,36 @@ const inMemoryStore = {
     pushups: []
 };
 
-// Вспомогательная функция для безопасного преобразования telegram_id (поддержка браузера и Telegram)
+// Проверка соединения с Supabase при старте сервера
+async function testSupabaseConnection() {
+    if (!supabase) {
+        console.log('⚠️ Supabase клиент не инициализирован: проверьте переменные SUPABASE_URL и SUPABASE_KEY на хостинге.');
+        return;
+    }
+    try {
+        const { error } = await supabase.from('pushups').select('id').limit(1);
+        if (error) {
+            console.error('❌ Ошибка связи с Supabase (возможно, включен RLS или не созданы таблицы):', error.message);
+        } else {
+            console.log('✅ Успешное подключение к Supabase! База данных полностью доступна.');
+        }
+    } catch (err) {
+        console.error('❌ Исключение при подключении к Supabase:', err);
+    }
+}
+
+testSupabaseConnection();
+
+// Безопасное прерывание / парсинг Telegram ID (поддержка браузера и Telegram WebApp)
 function parseTelegramId(rawId) {
     if (!rawId || rawId === 'demo_user') {
-        return 356582454; // Дефолтный ID для тестов в браузере
+        return 356582454; 
     }
     const parsed = parseInt(rawId);
     return isNaN(parsed) ? 356582454 : parsed;
 }
 
-async function sendTelegramMessage(chatId, text, replyMarkup) {
-    if (!BOT_TOKEN) return;
-    try {
-        const payload = { chat_id: chatId, text: text, parse_mode: 'HTML' };
-        if (replyMarkup) payload.reply_markup = replyMarkup;
-
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-    } catch (e) {
-        console.error('TG API Error:', e);
-    }
-}
-
+// Эндпоинты API
 app.get('/api/user-data', async (req, res) => {
     const telegramIdRaw = req.query.telegram_id || 'demo_user';
     const userIdInt = parseTelegramId(telegramIdRaw);
@@ -168,8 +173,8 @@ app.post('/api/save-settings', async (req, res) => {
         if (error) throw error;
         res.json({ status: 'ok' });
     } catch (e) {
-        console.error(e);
-        res.json({ status: 'error' });
+        console.error('Settings save error:', e);
+        res.status(500).json({ status: 'error' });
     }
 });
 
@@ -193,11 +198,12 @@ app.post('/api/save-profile', async (req, res) => {
         if (error) throw error;
         res.json({ status: 'ok' });
     } catch (e) {
-        console.error(e);
-        res.json({ status: 'error' });
+        console.error('Profile save error:', e);
+        res.status(500).json({ status: 'error' });
     }
 });
 
+// HTML-интерфейс с полной адаптацией под мобильные экраны и безопасные зоны (Safe Areas)
 const HTML_PAGE = `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -228,7 +234,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
         html, body {
             width: 100%;
-            height: 100%;
+            height: 100dvh;
             background-color: var(--bg-main);
             color: var(--text-primary);
             overflow: hidden;
@@ -237,10 +243,11 @@ const HTML_PAGE = `<!DOCTYPE html>
 
         .app-wrapper {
             width: 100%;
-            height: 100%;
+            height: 100dvh;
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            padding-top: env(safe-area-inset-top);
         }
 
         .content-area {
@@ -412,7 +419,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             outline: none;
         }
 
-        /* Calendar Grid Styles */
+        /* Calendar Grid */
         .calendar-header {
             display: flex;
             justify-content: space-between;
@@ -451,11 +458,9 @@ const HTML_PAGE = `<!DOCTYPE html>
             border: 1px solid var(--accent-green);
             color: var(--accent-green);
         }
-        .calendar-day.today {
-            border: 1px solid var(--primary);
-        }
+        .calendar-day.today { border: 1px solid var(--primary); }
 
-        /* Chart & Stats Styles */
+        /* Stats & Charts */
         .chart-tabs {
             display: flex;
             background: var(--glass-lighter);
@@ -521,12 +526,8 @@ const HTML_PAGE = `<!DOCTYPE html>
             transition: height 0.4s ease;
             position: relative;
         }
-        .chart-bar.filled {
-            background: linear-gradient(180deg, var(--accent-green), #248a3d);
-        }
-        .chart-bar.active-day {
-            background: linear-gradient(180deg, var(--primary), var(--primary-light));
-        }
+        .chart-bar.filled { background: linear-gradient(180deg, var(--accent-green), #248a3d); }
+        .chart-bar.active-day { background: linear-gradient(180deg, var(--primary), var(--primary-light)); }
         .chart-label {
             font-size: 10px;
             color: var(--text-secondary);
@@ -539,14 +540,14 @@ const HTML_PAGE = `<!DOCTYPE html>
             bottom: 0;
             left: 0;
             right: 0;
-            height: 75px;
+            height: calc(65px + env(safe-area-inset-bottom));
             background: var(--glass-light);
             display: flex;
             justify-content: space-around;
             align-items: flex-start;
             padding-top: 10px;
-            border-top: 1px solid rgba(255,255,255,0.05);
             padding-bottom: env(safe-area-inset-bottom);
+            border-top: 1px solid rgba(255,255,255,0.05);
             z-index: 100;
         }
 
@@ -588,12 +589,12 @@ const HTML_PAGE = `<!DOCTYPE html>
 <div class="app-wrapper">
     <div class="content-area">
         
-        <!-- ГЛАВНАЯ ЭКРАН -->
+        <!-- ГЛАВНАЯ -->
         <div id="screen-main" class="screen active">
             <div class="glass-card header-top">
                 <div class="header-icon">🏋️</div>
                 <div>
-                    <div style="font-size: 10px; color: var(--text-secondary); letter-spacing: 1px; font-weight: 700;">IOS FITNESS TRACKER</div>
+                    <div style="font-size: 10px; color: var(--text-secondary); letter-spacing: 1px; font-weight: 700;">FITNESS TRACKER</div>
                     <div style="font-size: 20px; font-weight: 700;">Отжимания</div>
                 </div>
             </div>
@@ -1154,5 +1155,5 @@ app.get('*', (req, res, next) => {
 });
 
 app.listen(port, () => {
-    console.log('✅ Сервер запущен на порту ' + port);
+    console.log('✅ Сервер успешно запущен на порту ' + port);
 });
