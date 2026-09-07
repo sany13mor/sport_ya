@@ -1,6 +1,5 @@
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
-const https = require('https');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -25,28 +24,37 @@ const inMemoryStore = {
 // Карта отложенных уведомлений (snooze)
 const snoozeMap = new Map();
 
-// Хелпер отправки сообщений в Telegram
-function sendTelegramMessage(chatId, text, replyMarkup) {
-    if (!BOT_TOKEN) return;
-    const payload = { chat_id: chatId, text: text, parse_mode: 'HTML' };
-    if (replyMarkup) payload.reply_markup = replyMarkup;
+// Очистка памяти: раз в час удаляем просроченные таймеры
+setInterval(() => {
+    const now = Date.now();
+    for (const [chatId, time] of snoozeMap.entries()) {
+        if (now > time) snoozeMap.delete(chatId);
+    }
+}, 60 * 60 * 1000);
 
-    const data = JSON.stringify(payload);
-    const req = https.request({
-        hostname: 'api.telegram.org',
-        path: '/bot' + BOT_TOKEN + '/sendMessage',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
-    });
-    req.on('error', (e) => console.error('TG API Error:', e));
-    req.write(data);
-    req.end();
+// Хелпер отправки сообщений в Telegram через современный fetch API
+async function sendTelegramMessage(chatId, text, replyMarkup) {
+    if (!BOT_TOKEN) return;
+    try {
+        const payload = { chat_id: chatId, text: text, parse_mode: 'HTML' };
+        if (replyMarkup) payload.reply_markup = replyMarkup;
+
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+    } catch (e) {
+        console.error('TG API Error:', e);
+    }
 }
 
 // ------------------- REST API ДЛЯ СОХРАНЕНИЯ И ПОЛУЧЕНИЯ ДАННЫХ -------------------
 
-// 1. Загрузка всех данных пользователя
+// 1. Загрузка данных пользователя (с лимитом для предотвращения зависаний)
 app.get('/api/user-data', async (req, res) => {
+    // Внимание для продакшена: req.query.telegram_id небезопасен. 
+    // В идеале нужно передавать Telegram initData и валидировать его через BOT_TOKEN.
     const telegramId = String(req.query.telegram_id || 'demo_user');
 
     if (!supabase) {
@@ -54,14 +62,20 @@ app.get('/api/user-data', async (req, res) => {
             status: 'ok',
             settings: inMemoryStore.settings[telegramId] || null,
             profile: inMemoryStore.profiles[telegramId] || null,
-            pushups: inMemoryStore.pushups.filter(p => p.telegram_id === telegramId)
+            pushups: inMemoryStore.pushups.filter(p => p.telegram_id === telegramId).slice(0, 300)
         });
     }
 
     try {
         const { data: settings } = await supabase.from('user_settings').select('*').eq('telegram_id', telegramId).maybeSingle();
         const { data: profile } = await supabase.from('user_profiles').select('*').eq('telegram_id', telegramId).maybeSingle();
-        const { data: pushups } = await supabase.from('pushups').select('*').eq('telegram_id', telegramId).order('created_at', { ascending: false });
+        
+        // Лимитируем 300 записями, чтобы не положить фронтенд при длительном использовании
+        const { data: pushups } = await supabase.from('pushups')
+            .select('*')
+            .eq('telegram_id', telegramId)
+            .order('created_at', { ascending: false })
+            .limit(300);
 
         res.json({
             status: 'ok',
@@ -75,7 +89,7 @@ app.get('/api/user-data', async (req, res) => {
             status: 'ok',
             settings: inMemoryStore.settings[telegramId] || null,
             profile: inMemoryStore.profiles[telegramId] || null,
-            pushups: inMemoryStore.pushups.filter(p => p.telegram_id === telegramId)
+            pushups: inMemoryStore.pushups.filter(p => p.telegram_id === telegramId).slice(0, 300)
         });
     }
 });
@@ -164,6 +178,7 @@ app.post('/api/save-settings', async (req, res) => {
         if (error) throw error;
         res.json({ status: 'ok' });
     } catch (e) {
+        console.error('Save settings error:', e);
         res.json({ status: 'ok' });
     }
 });
@@ -190,77 +205,67 @@ app.post('/api/save-profile', async (req, res) => {
         if (error) throw error;
         res.json({ status: 'ok' });
     } catch (e) {
+        console.error('Save profile error:', e);
         res.json({ status: 'ok' });
     }
 });
 
-// Webhook от Telegram
+// 6. Webhook от Telegram
 app.post('/api/telegram-webhook', async (req, res) => {
+    // Немедленный ответ, чтобы Telegram не дублировал запросы (таймаут фикс)
+    res.status(200).send('OK');
+
     try {
         const update = req.body;
-        if (update && update.callback_query) {
-            const cb = update.callback_query;
-            const chatId = cb.message.chat.id;
-            const data = cb.data;
+        if (!update || !update.callback_query) return;
 
-            if (data.startsWith('add_')) {
-                const count = parseInt(data.replace('add_', ''));
-                if (count > 0) {
-                    if (supabase) {
-                        await supabase.from('pushups').insert([{
-                            telegram_id: String(chatId),
-                            count: count,
-                            created_at: new Date().toISOString()
-                        }]);
-                    } else {
-                        inMemoryStore.pushups.unshift({
-                            id: 'p_' + Date.now(),
-                            telegram_id: String(chatId),
-                            count: count,
-                            created_at: new Date().toISOString()
-                        });
-                    }
+        const cb = update.callback_query;
+        const chatId = cb.message.chat.id;
+        const data = cb.data;
+
+        if (data.startsWith('add_')) {
+            const count = parseInt(data.replace('add_', ''));
+            if (count > 0) {
+                if (supabase) {
+                    await supabase.from('pushups').insert([{
+                        telegram_id: String(chatId),
+                        count: count,
+                        created_at: new Date().toISOString()
+                    }]);
+                } else {
+                    inMemoryStore.pushups.unshift({
+                        id: 'p_' + Date.now(),
+                        telegram_id: String(chatId),
+                        count: count,
+                        created_at: new Date().toISOString()
+                    });
                 }
-                const ackPayload = JSON.stringify({
-                    callback_query_id: cb.id,
-                    text: 'Записано +' + count + ' отжиманий! 🔥',
-                    show_alert: true
-                });
-                const ackReq = https.request({
-                    hostname: 'api.telegram.org',
-                    path: '/bot' + BOT_TOKEN + '/answerCallbackQuery',
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(ackPayload) }
-                });
-                ackReq.write(ackPayload);
-                ackReq.end();
-
-                sendTelegramMessage(chatId, '✅ <b>Записано +' + count + ' отжиманий!</b>\nОтличная работа! 💪');
-            } else if (data.startsWith('snooze_')) {
-                const mins = parseInt(data.replace('snooze_', ''));
-                snoozeMap.set(String(chatId), Date.now() + mins * 60 * 1000);
-
-                const ackPayload = JSON.stringify({
-                    callback_query_id: cb.id,
-                    text: 'Напоминание отложено на ' + mins + ' мин. ⏳',
-                    show_alert: true
-                });
-                const ackReq = https.request({
-                    hostname: 'api.telegram.org',
-                    path: '/bot' + BOT_TOKEN + '/answerCallbackQuery',
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(ackPayload) }
-                });
-                ackReq.write(ackPayload);
-                ackReq.end();
-
-                sendTelegramMessage(chatId, '⏰ Напомню об отжиманиях через <b>' + mins + ' минут</b>!');
             }
+
+            // Отправляем Alert об успехе
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ callback_query_id: cb.id, text: 'Записано +' + count + ' отжиманий! 🔥', show_alert: true })
+            });
+
+            sendTelegramMessage(chatId, '✅ <b>Записано +' + count + ' отжиманий!</b>\nОтличная работа! 💪');
+            
+        } else if (data.startsWith('snooze_')) {
+            const mins = parseInt(data.replace('snooze_', ''));
+            snoozeMap.set(String(chatId), Date.now() + mins * 60 * 1000);
+
+            // Отправляем Alert об успехе
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ callback_query_id: cb.id, text: 'Напоминание отложено на ' + mins + ' мин. ⏳', show_alert: true })
+            });
+
+            sendTelegramMessage(chatId, '⏰ Напомню об отжиманиях через <b>' + mins + ' минут</b>!');
         }
-        res.status(200).send('OK');
     } catch (e) {
-        console.error('Webhook error:', e);
-        res.status(500).send('Error');
+        console.error('Webhook processing error:', e);
     }
 });
 
@@ -315,12 +320,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             overflow-x: hidden;
         }
 
-        .container {
-            max-width: 460px;
-            margin: 0 auto;
-            padding: 12px 16px;
-        }
-
+        .container { max-width: 460px; margin: 0 auto; padding: 12px 16px; }
         .screen { display: none; }
         .screen.active { display: block; animation: fadeIn 0.2s ease-in-out; }
 
@@ -348,363 +348,119 @@ const HTML_PAGE = `<!DOCTYPE html>
             margin-bottom: 12px;
         }
 
-        .badge-card {
-            display: flex;
-            align-items: center;
-            gap: 14px;
-        }
+        .badge-card { display: flex; align-items: center; gap: 14px; }
         .badge-icon {
-            width: 44px;
-            height: 44px;
-            border-radius: 50%;
+            width: 44px; height: 44px; border-radius: 50%;
             background: linear-gradient(135deg, #10b981 0%, #0ea5e9 100%);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 18px;
-            font-weight: 800;
-            color: #fff;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 18px; font-weight: 800; color: #fff;
             box-shadow: 0 2px 10px rgba(16, 185, 129, 0.3);
         }
         .badge-info .subtitle {
-            font-size: 10px;
-            font-weight: 700;
-            letter-spacing: 0.6px;
-            color: var(--text-muted);
-            text-transform: uppercase;
+            font-size: 10px; font-weight: 700; letter-spacing: 0.6px;
+            color: var(--text-muted); text-transform: uppercase;
         }
-        .badge-info .title {
-            font-size: 18px;
-            font-weight: 800;
-            color: #fff;
-            margin-top: 2px;
-        }
+        .badge-info .title { font-size: 18px; font-weight: 800; color: #fff; margin-top: 2px; }
 
-        .progress-content {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 16px;
-        }
-        .ring-container {
-            position: relative;
-            width: 105px;
-            height: 105px;
-            flex-shrink: 0;
-        }
-        .ring-svg {
-            transform: rotate(-90deg);
-            width: 100%;
-            height: 100%;
-        }
-        .ring-bg {
-            stroke: rgba(255, 255, 255, 0.08);
-            stroke-width: 8;
-            fill: none;
-        }
+        .progress-content { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+        .ring-container { position: relative; width: 105px; height: 105px; flex-shrink: 0; }
+        .ring-svg { transform: rotate(-90deg); width: 100%; height: 100%; }
+        .ring-bg { stroke: rgba(255, 255, 255, 0.08); stroke-width: 8; fill: none; }
         .ring-fill {
-            stroke: url(#gradient);
-            stroke-width: 8;
-            fill: none;
-            stroke-linecap: round;
-            stroke-dasharray: 264;
-            stroke-dashoffset: 264;
-            transition: stroke-dashoffset 0.6s ease;
+            stroke: url(#gradient); stroke-width: 8; fill: none; stroke-linecap: round;
+            stroke-dasharray: 264; stroke-dashoffset: 264; transition: stroke-dashoffset 0.6s ease;
         }
-        .ring-text {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            font-size: 18px;
-            font-weight: 800;
-            color: #fff;
-        }
+        .ring-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; font-weight: 800; color: #fff; }
+        
         .stats-col { flex-grow: 1; }
         .stat-block { margin-bottom: 10px; }
         .stat-block:last-child { margin-bottom: 0; }
-        .stat-num-main {
-            font-size: 26px;
-            font-weight: 800;
-            color: #fff;
-            line-height: 1.1;
-        }
-        .stat-num-blue {
-            font-size: 22px;
-            font-weight: 800;
-            color: var(--accent-blue);
-            line-height: 1.1;
-        }
-        .stat-lbl {
-            font-size: 12px;
-            color: var(--text-muted);
-            margin-top: 2px;
-        }
+        .stat-num-main { font-size: 26px; font-weight: 800; color: #fff; line-height: 1.1; }
+        .stat-num-blue { font-size: 22px; font-weight: 800; color: var(--accent-blue); line-height: 1.1; }
+        .stat-lbl { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
 
-        .quick-buttons {
-            display: grid;
-            grid-template-columns: repeat(5, 1fr);
-            gap: 8px;
-            margin-bottom: 12px;
-        }
+        .quick-buttons { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 12px; }
         .btn-quick {
-            background: var(--input-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 10px;
-            color: #fff;
-            font-size: 14px;
-            font-weight: 700;
-            padding: 10px 0;
-            text-align: center;
-            cursor: pointer;
-            transition: all 0.15s ease;
+            background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px;
+            color: #fff; font-size: 14px; font-weight: 700; padding: 10px 0; text-align: center;
+            cursor: pointer; transition: all 0.15s ease;
         }
-        .btn-quick:active {
-            transform: scale(0.95);
-            background: #2a3447;
-        }
+        .btn-quick:active { transform: scale(0.95); background: #2a3447; }
 
-        .input-row {
-            display: flex;
-            gap: 8px;
-            width: 100%;
-            align-items: center;
-        }
+        .input-row { display: flex; gap: 8px; width: 100%; align-items: center; }
         .custom-input {
-            flex: 1;
-            min-width: 0;
-            background: var(--input-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 12px;
-            padding: 12px 10px;
-            color: #fff;
-            font-size: 14px;
-            outline: none;
+            flex: 1; min-width: 0; background: var(--input-bg); border: 1px solid var(--card-border);
+            border-radius: 12px; padding: 12px 10px; color: #fff; font-size: 14px; outline: none;
         }
         .custom-input::placeholder { color: var(--text-muted); }
 
         .btn-green {
-            flex-shrink: 0;
-            background: var(--accent-green);
-            color: #fff;
-            border: none;
-            border-radius: 12px;
-            padding: 12px 16px;
-            font-size: 14px;
-            font-weight: 700;
-            cursor: pointer;
-            transition: background 0.15s ease, transform 0.1s ease;
-            white-space: nowrap;
+            flex-shrink: 0; background: var(--accent-green); color: #fff; border: none;
+            border-radius: 12px; padding: 12px 16px; font-size: 14px; font-weight: 700;
+            cursor: pointer; transition: background 0.15s ease, transform 0.1s ease; white-space: nowrap;
         }
-        .btn-green:active {
-            background: var(--accent-green-hover);
-            transform: scale(0.98);
-        }
-        .btn-full {
-            width: 100%;
-            display: block;
-            margin-top: 14px;
-            padding: 14px;
-            text-align: center;
-        }
+        .btn-green:active { background: var(--accent-green-hover); transform: scale(0.98); }
+        .btn-full { width: 100%; display: block; margin-top: 14px; padding: 14px; text-align: center; }
 
-        .sets-list {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
+        .sets-list { display: flex; flex-direction: column; gap: 8px; }
         .set-item {
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px solid rgba(255, 255, 255, 0.04);
-            border-radius: 12px;
-            padding: 12px 16px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
+            background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 12px; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between;
         }
-        .set-count {
-            font-size: 16px;
-            font-weight: 800;
-            color: var(--accent-green);
-        }
-        .set-time {
-            font-size: 13px;
-            color: var(--text-muted);
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .btn-del-set {
-            color: #ef4444;
-            background: none;
-            border: none;
-            font-size: 16px;
-            cursor: pointer;
-            padding: 0 4px;
-        }
+        .set-count { font-size: 16px; font-weight: 800; color: var(--accent-green); }
+        .set-time { font-size: 13px; color: var(--text-muted); display: flex; align-items: center; gap: 10px; }
+        .btn-del-set { color: #ef4444; background: none; border: none; font-size: 16px; cursor: pointer; padding: 0 4px; }
 
-        .form-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 12px 0;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-        }
+        .form-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
         .form-row:last-child { border-bottom: none; }
-        .form-label-box {
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-        }
-        .form-label-main {
-            font-size: 15px;
-            font-weight: 600;
-            color: #fff;
-        }
-        .form-label-sub {
-            font-size: 12px;
-            color: var(--text-muted);
-        }
+        .form-label-box { display: flex; flex-direction: column; gap: 2px; }
+        .form-label-main { font-size: 15px; font-weight: 600; color: #fff; }
+        .form-label-sub { font-size: 12px; color: var(--text-muted); }
         .form-input-sm {
-            width: 90px;
-            background: var(--input-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 10px;
-            padding: 8px 10px;
-            color: #fff;
-            font-size: 15px;
-            font-weight: 600;
-            text-align: center;
-            outline: none;
+            width: 90px; background: var(--input-bg); border: 1px solid var(--card-border);
+            border-radius: 10px; padding: 8px 10px; color: #fff; font-size: 15px;
+            font-weight: 600; text-align: center; outline: none;
         }
         .form-select-sm {
-            background: var(--input-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 10px;
-            padding: 8px 12px;
-            color: #fff;
-            font-size: 13px;
-            font-weight: 600;
-            outline: none;
+            background: var(--input-bg); border: 1px solid var(--card-border); border-radius: 10px;
+            padding: 8px 12px; color: #fff; font-size: 13px; font-weight: 600; outline: none;
         }
         .checkbox-toggle {
-            width: 26px;
-            height: 26px;
-            background: var(--accent-green);
-            border-radius: 6px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            color: #fff;
-            font-weight: bold;
-            font-size: 14px;
+            width: 26px; height: 26px; background: var(--accent-green); border-radius: 6px;
+            display: flex; align-items: center; justify-content: center; cursor: pointer;
+            color: #fff; font-weight: bold; font-size: 14px;
         }
-        .checkbox-toggle.off {
-            background: var(--input-bg);
-            color: transparent;
-            border: 1px solid var(--card-border);
-        }
-        .time-range-group {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
+        .checkbox-toggle.off { background: var(--input-bg); color: transparent; border: 1px solid var(--card-border); }
+        .time-range-group { display: flex; align-items: center; gap: 6px; }
         .time-input-sm {
-            width: 75px;
-            background: var(--input-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 8px;
-            padding: 6px;
-            color: #fff;
-            font-size: 13px;
-            text-align: center;
-            outline: none;
+            width: 75px; background: var(--input-bg); border: 1px solid var(--card-border);
+            border-radius: 8px; padding: 6px; color: #fff; font-size: 13px; text-align: center; outline: none;
         }
 
-        .calendar-grid {
-            display: grid;
-            grid-template-columns: repeat(7, 1fr);
-            gap: 6px;
-            text-align: center;
-            margin-top: 10px;
-        }
-        .cal-day-head {
-            font-size: 12px;
-            color: var(--text-muted);
-            font-weight: 700;
-            padding-bottom: 6px;
-        }
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; text-align: center; margin-top: 10px; }
+        .cal-day-head { font-size: 12px; color: var(--text-muted); font-weight: 700; padding-bottom: 6px; }
         .cal-day-cell {
-            aspect-ratio: 1;
-            background: var(--input-bg);
-            border-radius: 10px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            font-size: 13px;
-            font-weight: 600;
-            color: #fff;
+            aspect-ratio: 1; background: var(--input-bg); border-radius: 10px; display: flex;
+            flex-direction: column; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: #fff;
         }
-        .cal-day-cell.active-day {
-            background: rgba(34, 197, 94, 0.2);
-            border: 1px solid var(--accent-green);
-            color: var(--accent-green);
-        }
+        .cal-day-cell.active-day { background: rgba(34, 197, 94, 0.2); border: 1px solid var(--accent-green); color: var(--accent-green); }
 
-        .bmi-box {
-            background: var(--input-bg);
-            border-radius: 12px;
-            padding: 14px;
-            text-align: center;
-            margin-top: 12px;
-        }
-        .bmi-value {
-            font-size: 24px;
-            font-weight: 800;
-            color: #fff;
-        }
+        .bmi-box { background: var(--input-bg); border-radius: 12px; padding: 14px; text-align: center; margin-top: 12px; }
+        .bmi-value { font-size: 24px; font-weight: 800; color: #fff; }
         .bmi-status {
-            display: inline-block;
-            margin-top: 6px;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 700;
-            background: rgba(34, 197, 94, 0.2);
-            color: var(--accent-green);
+            display: inline-block; margin-top: 6px; padding: 4px 12px; border-radius: 20px;
+            font-size: 12px; font-weight: 700; background: rgba(34, 197, 94, 0.2); color: var(--accent-green);
         }
 
         .nav-bar {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            height: calc(65px + env(safe-area-inset-bottom, 15px));
-            background: rgba(18, 24, 36, 0.96);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border-top: 1px solid rgba(255, 255, 255, 0.08);
-            display: flex;
-            align-items: center;
-            justify-content: space-around;
-            padding-bottom: env(safe-area-inset-bottom, 15px);
-            z-index: 9999;
+            position: fixed; bottom: 0; left: 0; right: 0; height: calc(65px + env(safe-area-inset-bottom, 15px));
+            background: rgba(18, 24, 36, 0.96); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+            border-top: 1px solid rgba(255, 255, 255, 0.08); display: flex; align-items: center; justify-content: space-around;
+            padding-bottom: env(safe-area-inset-bottom, 15px); z-index: 9999;
         }
         .nav-item {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            gap: 4px;
-            color: var(--tab-inactive);
-            font-size: 11px;
-            font-weight: 600;
-            cursor: pointer;
-            width: 20%;
-            height: 100%;
-            transition: color 0.15s ease;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+            color: var(--tab-inactive); font-size: 11px; font-weight: 600; cursor: pointer; width: 20%; height: 100%; transition: color 0.15s ease;
         }
         .nav-item svg { width: 22px; height: 22px; fill: currentColor; pointer-events: none; }
         .nav-item span { pointer-events: none; }
@@ -714,10 +470,8 @@ const HTML_PAGE = `<!DOCTYPE html>
 <body>
 
 <div class="container">
-
     <!-- ГЛАВНАЯ -->
     <div id="screen-main" class="screen active">
-        
         <div class="card badge-card">
             <div class="badge-icon" id="streak-icon">1</div>
             <div class="badge-info">
@@ -775,7 +529,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             <div class="card-header-title">СЕГОДНЯШНИЕ ПОДХОДЫ</div>
             <div id="today-sets-list" class="sets-list"></div>
         </div>
-
     </div>
 
     <!-- КАЛЕНДАРЬ -->
@@ -893,10 +646,9 @@ const HTML_PAGE = `<!DOCTYPE html>
             <button class="btn-green btn-full" onclick="saveSettingsData()">Сохранить настройки</button>
         </div>
     </div>
-
 </div>
 
-<!-- Нибижняя панель навигации -->
+<!-- Нижняя панель навигации -->
 <div class="nav-bar">
     <div class="nav-item active" onclick="switchTab('main')">
         <svg viewBox="0 0 24 24"><path d="M3 13h4v8H3zm7-8h4v16h-4zm7 4h4v12h-4z"/></svg>
@@ -960,7 +712,6 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
     }
 
-    // Загрузка данных при старте
     async function loadUserData() {
         try {
             const res = await fetch('/api/user-data?telegram_id=' + telegramId);
@@ -1037,9 +788,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     function getTodaySets() {
         const todayStr = formatDateLocal(new Date());
-        return state.pushupsHistory.filter(item => {
-            return formatDateLocal(item.created_at) === todayStr;
-        });
+        return state.pushupsHistory.filter(item => formatDateLocal(item.created_at) === todayStr);
     }
 
     function updateProgressUI() {
@@ -1071,7 +820,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                 div.innerHTML = '<span class="set-count">+' + item.count + '</span>' +
                                 '<div class="set-time">' +
                                     '<span>' + timeStr + '</span>' +
-                                    '<button class="btn-del-set" onclick="deleteSet(\'' + item.id + '\')">✕</button>' +
+                                    '<button class="btn-del-set" onclick="deleteSet(\\'' + item.id + '\\')">✕</button>' +
                                 '</div>';
                 listEl.appendChild(div);
             });
@@ -1234,6 +983,16 @@ const HTML_PAGE = `<!DOCTYPE html>
         document.getElementById('cal-month-title').innerText = now.toLocaleString('ru', { month: 'long', year: 'numeric' });
 
         const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        
+        // ВЫЧИСЛЕНИЕ ПУСТЫХ ЯЧЕЕК ПЕРЕД НАЧАЛОМ МЕСЯЦА (фикс съехавших дней недели)
+        const firstDayIndex = new Date(now.getFullYear(), now.getMonth(), 1).getDay();
+        const emptyCells = (firstDayIndex + 6) % 7;
+
+        for (let i = 0; i < emptyCells; i++) {
+            const emptyCell = document.createElement('div');
+            container.appendChild(emptyCell);
+        }
+
         for (let i = 1; i <= daysInMonth; i++) {
             const cell = document.createElement('div');
             cell.className = 'cal-day-cell';
