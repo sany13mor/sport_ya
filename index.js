@@ -1,14 +1,3 @@
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const BOT_TOKEN = process.env.BOT_TOKEN;
-
-if (!SUPABASE_URL || !SUPABASE_URL.startsWith('http')) {
-    console.error('❌ ОШИБКА: Не задан SUPABASE_URL в Environment Variables!');
-}
-
-const supabase = (SUPABASE_URL && SUPABASE_KEY) 
-    ? createClient(SUPABASE_URL, SUPABASE_KEY) 
-    : null;
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const https = require('https');
@@ -16,12 +5,18 @@ const https = require('https');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Переменные окружения (добавьте их в Render Environment Variables)
-const SUPABASE_URL = process.env.SUPABASE_URL || 'YOUR_SUPABASE_URL';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || 'YOUR_SUPABASE_KEY';
-const BOT_TOKEN = process.env.BOT_TOKEN || 'YOUR_TELEGRAM_BOT_TOKEN';
+// Переменные окружения из Render
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const BOT_TOKEN = process.env.BOT_TOKEN;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+if (!SUPABASE_URL || !SUPABASE_URL.startsWith('http')) {
+    console.error('❌ ОШИБКА: Не задан корректный SUPABASE_URL в Environment Variables!');
+}
+
+const supabase = (SUPABASE_URL && SUPABASE_KEY) 
+    ? createClient(SUPABASE_URL, SUPABASE_KEY) 
+    : null;
 
 app.use(express.json());
 
