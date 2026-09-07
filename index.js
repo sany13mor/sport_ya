@@ -1,3 +1,14 @@
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+
+if (!SUPABASE_URL || !SUPABASE_URL.startsWith('http')) {
+    console.error('❌ ОШИБКА: Не задан SUPABASE_URL в Environment Variables!');
+}
+
+const supabase = (SUPABASE_URL && SUPABASE_KEY) 
+    ? createClient(SUPABASE_URL, SUPABASE_KEY) 
+    : null;
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const https = require('https');
