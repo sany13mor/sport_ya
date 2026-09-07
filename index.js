@@ -118,10 +118,8 @@ app.get('/api/send-reminders', async (req, res) => {
             const start = user.time_start || "09:00";
             const end = user.time_end || "22:00";
 
-            // Проверка диапазона времени
             if (currentHM < start || currentHM > end) continue;
 
-            // Проверка отсрочки (snooze)
             const snoozeUntil = snoozeMap.get(String(user.telegram_id));
             if (snoozeUntil && Date.now() < snoozeUntil) continue;
 
@@ -151,7 +149,7 @@ app.get('/api/send-reminders', async (req, res) => {
     }
 });
 
-// Веб-приложение (Mini App)
+// Веб-приложение (Mini App HTML)
 const HTML_PAGE = `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -228,7 +226,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             margin-bottom: 12px;
         }
 
-        /* Top Streak Card */
         .badge-card {
             display: flex;
             align-items: center;
@@ -261,7 +258,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             margin-top: 2px;
         }
 
-        /* Ring Chart */
         .progress-content {
             display: flex;
             align-items: center;
@@ -323,7 +319,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             margin-top: 2px;
         }
 
-        /* Quick Input */
         .quick-buttons {
             display: grid;
             grid-template-columns: repeat(5, 1fr);
@@ -387,7 +382,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             text-align: center;
         }
 
-        /* Today Sets */
         .sets-list {
             display: flex;
             flex-direction: column;
@@ -423,7 +417,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             padding: 0 4px;
         }
 
-        /* Form Rows (Settings & Profile) */
         .form-row {
             display: flex;
             align-items: center;
@@ -503,7 +496,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             outline: none;
         }
 
-        /* Calendar Grid */
         .calendar-grid {
             display: grid;
             grid-template-columns: repeat(7, 1fr);
@@ -511,18 +503,11 @@ const HTML_PAGE = `<!DOCTYPE html>
             text-align: center;
             margin-top: 10px;
         }
-        .cal-day-head {
-            font-size: 12px;
-            color: var(--text-muted);
-            font-weight: 700;
-            padding-bottom: 6px;
-        }
         .cal-day-cell {
             aspect-ratio: 1;
             background: var(--input-bg);
             border-radius: 10px;
             display: flex;
-            flex-direction: column;
             align-items: center;
             justify-content: center;
             font-size: 13px;
@@ -535,7 +520,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             color: var(--accent-green);
         }
 
-        /* BMI Pill */
         .bmi-box {
             background: var(--input-bg);
             border-radius: 12px;
@@ -559,7 +543,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             color: var(--accent-green);
         }
 
-        /* Nav Bar */
         .nav-bar {
             position: fixed;
             bottom: 0;
@@ -599,12 +582,11 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     <!-- ГЛАВНАЯ -->
     <div id="screen-main" class="screen active">
-        
         <div class="card badge-card">
             <div class="badge-icon">1</div>
             <div class="badge-info">
                 <div class="subtitle">IOS FITNESS TRACKER</div>
-                <div class="title" id="streak-days-text">13-й</div>
+                <div class="title" id="streak-days-text">13-й день</div>
             </div>
         </div>
 
@@ -622,16 +604,16 @@ const HTML_PAGE = `<!DOCTYPE html>
                         <circle class="ring-bg" cx="50" cy="50" r="42"></circle>
                         <circle id="ring-progress" class="ring-fill" cx="50" cy="50" r="42"></circle>
                     </svg>
-                    <div class="ring-text" id="ring-pct">100%</div>
+                    <div class="ring-text" id="ring-pct">0%</div>
                 </div>
 
                 <div class="stats-col">
                     <div class="stat-block">
-                        <div class="stat-num-main"><span id="today-total">125</span> / <span id="target-goal">100</span></div>
+                        <div class="stat-num-main"><span id="today-total">0</span> / <span id="target-goal">100</span></div>
                         <div class="stat-lbl">Отжиманий сегодня</div>
                     </div>
                     <div class="stat-block">
-                        <div class="stat-num-blue" id="today-sets-count">4</div>
+                        <div class="stat-num-blue" id="today-sets-count">0</div>
                         <div class="stat-lbl">Выполнено подходов</div>
                     </div>
                 </div>
@@ -648,7 +630,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                 <div class="btn-quick" onclick="addQuick(35)">+35</div>
             </div>
             <div class="input-row">
-                <input type="number" id="custom-count-input" class="custom-input" placeholder="Введите своё число..." inputmode="numeric">
+                <input type="number" id="custom-count-input" class="custom-input" placeholder="Введите свое число..." inputmode="numeric">
                 <button class="btn-green" onclick="submitCustomCount()">Записать</button>
             </div>
         </div>
@@ -657,7 +639,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             <div class="card-header-title">СЕГОДНЯШНИЕ ПОДХОДЫ</div>
             <div id="today-sets-list" class="sets-list"></div>
         </div>
-
     </div>
 
     <!-- КАЛЕНДАРЬ -->
@@ -679,11 +660,10 @@ const HTML_PAGE = `<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- ПРОФИЛЬ (КАРТОЧКА СПОРТСМЕНА) -->
+    <!-- ПРОФИЛЬ -->
     <div id="screen-profile" class="screen">
         <div class="card">
             <div class="card-header-title">КАРТОЧКА СПОРТСМЕНА</div>
-            
             <div class="form-row">
                 <div class="form-label-box">
                     <div class="form-label-main">Текущий вес</div>
@@ -691,7 +671,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                 </div>
                 <input type="number" id="prof-weight" class="form-input-sm" value="80" oninput="calcBMI()">
             </div>
-
             <div class="form-row">
                 <div class="form-label-box">
                     <div class="form-label-main">Рост</div>
@@ -699,29 +678,11 @@ const HTML_PAGE = `<!DOCTYPE html>
                 </div>
                 <input type="number" id="prof-height" class="form-input-sm" value="180" oninput="calcBMI()">
             </div>
-
-            <div class="form-row">
-                <div class="form-label-box">
-                    <div class="form-label-main">% Жира</div>
-                    <div class="form-label-sub">Опционально</div>
-                </div>
-                <input type="number" id="prof-fat" class="form-input-sm" value="18">
-            </div>
-
-            <div class="form-row">
-                <div class="form-label-box">
-                    <div class="form-label-main">Целевой вес</div>
-                    <div class="form-label-sub">К чему стремимся</div>
-                </div>
-                <input type="number" id="prof-target-weight" class="form-input-sm" value="75">
-            </div>
-
             <div class="bmi-box">
                 <div style="font-size:12px; color:var(--text-muted);">Индекс массы тела (ИМТ)</div>
                 <div class="bmi-value" id="bmi-val">24.7</div>
                 <div class="bmi-status" id="bmi-status-label">Норма</div>
             </div>
-
             <button class="btn-green btn-full" onclick="saveProfileData()">Сохранить профиль</button>
         </div>
     </div>
@@ -730,7 +691,6 @@ const HTML_PAGE = `<!DOCTYPE html>
     <div id="screen-settings" class="screen">
         <div class="card">
             <div class="card-header-title">ПАРАМЕТРЫ ТРЕНИРОВОК</div>
-
             <div class="form-row">
                 <div class="form-label-box">
                     <div class="form-label-main">Дневная цель</div>
@@ -738,47 +698,13 @@ const HTML_PAGE = `<!DOCTYPE html>
                 </div>
                 <input type="number" id="set-daily-goal" class="form-input-sm" value="100">
             </div>
-
-            <div class="form-row">
-                <div class="form-label-box">
-                    <div class="form-label-main">Напоминания в Telegram</div>
-                    <div class="form-label-sub">Пуши от бота при паузе</div>
-                </div>
-                <div id="set-notif-toggle" class="checkbox-toggle" onclick="toggleNotif()">✓</div>
-            </div>
-
-            <div class="form-row">
-                <div class="form-label-box">
-                    <div class="form-label-main">Интервал уведомлений</div>
-                    <div class="form-label-sub">Частота отправки сообщений</div>
-                </div>
-                <select id="set-interval" class="form-select-sm">
-                    <option value="1">Каждый час</option>
-                    <option value="2">Каждые 2 часа</option>
-                    <option value="3" selected>Каждые 3 часа</option>
-                    <option value="4">Каждые 4 часа</option>
-                </select>
-            </div>
-
-            <div class="form-row">
-                <div class="form-label-box">
-                    <div class="form-label-main">Диапазон времени</div>
-                    <div class="form-label-sub">Со скольки и до скольки отправлять</div>
-                </div>
-                <div class="time-range-group">
-                    <input type="time" id="set-time-start" class="time-input-sm" value="09:00">
-                    <span style="font-size:12px; color:var(--text-muted);">—</span>
-                    <input type="time" id="set-time-end" class="time-input-sm" value="22:00">
-                </div>
-            </div>
-
             <button class="btn-green btn-full" onclick="saveSettingsData()">Сохранить настройки</button>
         </div>
     </div>
 
 </div>
 
-<!-- Нибижняя панель навигации -->
+<!-- Нижняя панель навигации -->
 <div class="nav-bar">
     <div class="nav-item active" onclick="switchTab('main')">
         <svg viewBox="0 0 24 24"><path d="M3 13h4v8H3zm7-8h4v16h-4zm7 4h4v12h-4z"/></svg>
@@ -811,18 +737,8 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     let state = {
         dailyGoal: 100,
-        notifEnabled: true,
-        notifInterval: 3,
-        timeStart: "09:00",
-        timeEnd: "22:00",
-        weight: 80,
-        height: 180,
-        fat: 18,
-        targetWeight: 75,
         todaySets: [
             { count: 35, time: "20:35" },
-            { count: 30, time: "20:33" },
-            { count: 30, time: "20:33" },
             { count: 30, time: "20:33" }
         ]
     };
@@ -846,9 +762,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                 navItems[idx].classList.remove('active');
             }
         });
-
-        if (tabName === 'calendar') renderCalendar();
-        if (tabName === 'progress') renderProgressChart();
     }
 
     function updateProgressUI() {
@@ -883,26 +796,21 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
     }
 
-    function addQuick(num) {
+    function addQuick(count) {
         triggerHaptic();
-        addPushups(num);
+        const now = new Date();
+        const timeStr = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
+        state.todaySets.unshift({ count: count, time: timeStr });
+        updateProgressUI();
     }
 
     function submitCustomCount() {
         const input = document.getElementById('custom-count-input');
         const val = parseInt(input.value);
-        if (val > 0) {
-            triggerHaptic();
-            addPushups(val);
+        if (val && val > 0) {
+            addQuick(val);
             input.value = '';
         }
-    }
-
-    function addPushups(count) {
-        const now = new Date();
-        const timeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
-        state.todaySets.unshift({ count: count, time: timeStr });
-        updateProgressUI();
     }
 
     function deleteSet(index) {
@@ -911,122 +819,47 @@ const HTML_PAGE = `<!DOCTYPE html>
         updateProgressUI();
     }
 
-    function toggleNotif() {
-        triggerHaptic();
-        state.notifEnabled = !state.notifEnabled;
-        const toggle = document.getElementById('set-notif-toggle');
-        if (state.notifEnabled) {
-            toggle.classList.remove('off');
-            toggle.innerText = '✓';
-        } else {
-            toggle.classList.add('off');
-            toggle.innerText = '';
-        }
-    }
-
     function calcBMI() {
-        const w = parseFloat(document.getElementById('prof-weight').value) || 0;
-        const h = (parseFloat(document.getElementById('prof-height').value) || 0) / 100;
+        const w = parseFloat(document.getElementById('prof-weight').value);
+        const h = parseFloat(document.getElementById('prof-height').value) / 100;
         if (w > 0 && h > 0) {
             const bmi = (w / (h * h)).toFixed(1);
             document.getElementById('bmi-val').innerText = bmi;
-            const statusEl = document.getElementById('bmi-status-label');
-            if (bmi < 18.5) {
-                statusEl.innerText = 'Дефицит массы';
-                statusEl.style.color = '#38bdf8';
-            } else if (bmi < 25) {
-                statusEl.innerText = 'Норма';
-                statusEl.style.color = '#22c55e';
-            } else if (bmi < 30) {
-                statusEl.innerText = 'Избыточный вес';
-                statusEl.style.color = '#f59e0b';
-            } else {
-                statusEl.innerText = 'Ожирение';
-                statusEl.style.color = '#ef4444';
-            }
         }
-    }
-
-    function saveSettingsData() {
-        triggerHaptic();
-        state.dailyGoal = parseInt(document.getElementById('set-daily-goal').value) || 100;
-        state.notifInterval = parseInt(document.getElementById('set-interval').value) || 3;
-        state.timeStart = document.getElementById('set-time-start').value || "09:00";
-        state.timeEnd = document.getElementById('set-time-end').value || "22:00";
-        updateProgressUI();
-        if (tg) tg.showAlert("Настройки успешно сохранены!");
     }
 
     function saveProfileData() {
         triggerHaptic();
-        if (tg) tg.showAlert("Карточка спортсмена обновлена!");
+        if (tg) tg.showAlert('Профиль сохранен!');
     }
 
-    function renderCalendar() {
-        const container = document.getElementById('calendar-grid-container');
-        container.innerHTML = '';
-        const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-        dayNames.forEach(d => {
-            const head = document.createElement('div');
-            head.className = 'cal-day-head';
-            head.innerText = d;
-            container.appendChild(head);
-        });
-
-        const now = new Date();
-        document.getElementById('cal-month-title').innerText = now.toLocaleString('ru', { month: 'long', year: 'numeric' });
-
-        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-        for (let i = 1; i <= daysInMonth; i++) {
-            const cell = document.createElement('div');
-            cell.className = 'cal-day-cell';
-            if (i === now.getDate()) {
-                cell.classList.add('active-day');
-                const total = state.todaySets.reduce((a, b) => a + b.count, 0);
-                cell.innerHTML = '<span>' + i + '</span>' + (total > 0 ? '<span style="font-size:9px; font-weight:800;">' + total + '</span>' : '');
-            } else {
-                cell.innerHTML = '<span>' + i + '</span>';
-            }
-            container.appendChild(cell);
-        }
+    function saveSettingsData() {
+        triggerHaptic();
+        const newGoal = parseInt(document.getElementById('set-daily-goal').value);
+        if (newGoal > 0) state.dailyGoal = newGoal;
+        updateProgressUI();
+        if (tg) tg.showAlert('Настройки сохранены!');
     }
 
-    function renderProgressChart() {
-        const container = document.getElementById('progress-bars-container');
-        container.innerHTML = '';
-        const days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-        const todayIdx = (new Date().getDay() + 6) % 7;
-
-        days.forEach((day, idx) => {
-            const col = document.createElement('div');
-            col.style.cssText = 'flex:1; display:flex; flex-direction:column; align-items:center; gap:6px; height:100%; justify-content:flex-end;';
-            
-            let val = (idx === todayIdx) ? state.todaySets.reduce((a, b) => a + b.count, 0) : Math.floor(Math.random() * 80 + 20);
-            let pct = Math.min(100, Math.round((val / state.dailyGoal) * 100));
-
-            const bar = document.createElement('div');
-            bar.style.cssText = 'width:100%; border-radius:6px; background:' + (idx === todayIdx ? 'var(--accent-green)' : 'var(--input-bg)') + '; height:' + Math.max(8, pct) + '%; transition:height 0.3s ease;';
-
-            const lbl = document.createElement('div');
-            lbl.style.cssText = 'font-size:11px; color:var(--text-muted);';
-            lbl.innerText = day;
-
-            col.appendChild(bar);
-            col.appendChild(lbl);
-            container.appendChild(col);
-        });
-    }
-
+    // Инициализация
     updateProgressUI();
     calcBMI();
 </script>
 </body>
 </html>`;
 
-app.get('/', (req, res) => {
+// Отдача приложения по URL /webapp и /
+app.get('/webapp', (req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(HTML_PAGE);
 });
 
+app.get('/', (req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(HTML_PAGE);
+});
+
+// Запуск сервера
 app.listen(port, () => {
-    console.log('Server is running on port ' + port);
+    console.log(`Server started on port ${port}`);
 });
