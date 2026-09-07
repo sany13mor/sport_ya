@@ -659,9 +659,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                     </div>
                 </div>
 
-                <div class="chart-container" id="chart-bars-area">
-                    <!-- График рендерится через JS -->
-                </div>
+                <div class="chart-container" id="chart-bars-area"></div>
             </div>
 
             <div class="glass-card">
@@ -780,8 +778,8 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     function switchTab(tab, event) {
         triggerHaptic();
-        document.querySelectorAll('.screen').forEach(el => el.classList.remove('active'));
-        document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.screen').forEach(function(el) { el.classList.remove('active'); });
+        document.querySelectorAll('.nav-item').forEach(function(el) { el.classList.remove('active'); });
         document.getElementById('screen-' + tab).classList.add('active');
         if (event && event.currentTarget) {
             event.currentTarget.classList.add('active');
@@ -835,10 +833,12 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     function updateProgressUI() {
         const todayStr = new Date().toISOString().split('T')[0];
-        const todaySets = state.pushupsHistory.filter(i => i.created_at && i.created_at.startsWith(todayStr));
-        const total = todaySets.reduce((a, b) => a + b.count, 0);
+        const todaySets = state.pushupsHistory.filter(function(i) {
+            return i.created_at && i.created_at.startsWith(todayStr);
+        });
+        const total = todaySets.reduce(function(a, b) { return a + b.count; }, 0);
 
-        document.getElementById('today-total-ui').innerHTML = total + ' <span style="font-size: 14px; color: var(--text-secondary); font-weight: 500;">/ ' + state.dailyGoal + '</span>';
+        document.getElementById('today-total-uiinnerHTMLHtml' || 'today-total-ui').innerHTML = total + ' <span style="font-size: 14px; color: var(--text-secondary); font-weight: 500;">/ ' + state.dailyGoal + '</span>';
         document.getElementById('today-sets-count-ui').innerText = todaySets.length;
 
         const pct = Math.min(100, Math.round((total / state.dailyGoal) * 100)) || 0;
@@ -855,21 +855,19 @@ const HTML_PAGE = `<!DOCTYPE html>
         if (todaySets.length === 0) {
             listEl.innerHTML = '<div style="text-align: center; color: var(--text-secondary); font-size: 14px; padding: 10px;">Нет данных за сегодня</div>';
         } else {
-            todaySets.forEach(item => {
+            todaySets.forEach(function(item) {
                 const timeStr = new Date(item.created_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-                listEl.innerHTML += `
-                    <div class="exercise-item">
-                        <span style="color: var(--accent-green); font-size: 16px; font-weight: 800;">+${item.count}</span>
-                        <div style="display: flex; gap: 12px; align-items: center;">
-                            <span style="color: var(--text-secondary); font-size: 14px;">${timeStr}</span>
-                            <button style="background: none; border: none; color: #555; padding: 4px; font-size: 16px;" onclick="deleteSet(${item.id})">✕</button>
-                        </div>
-                    </div>`;
+                listEl.innerHTML += '<div class="exercise-item">' +
+                    '<span style="color: var(--accent-green); font-size: 16px; font-weight: 800;">+' + item.count + '</span>' +
+                    '<div style="display: flex; gap: 12px; align-items: center;">' +
+                        '<span style="color: var(--text-secondary); font-size: 14px;">' + timeStr + '</span>' +
+                        '<button style="background: none; border: none; color: #555; padding: 4px; font-size: 16px;" onclick="deleteSet(' + item.id + ')">✕</button>' +
+                    '</div>' +
+                '</div>';
             });
         }
     }
 
-    // Оптимизированный мгновенный ввод (Optimistic UI)
     async function addQuick(count) {
         triggerHaptic();
         
@@ -892,14 +890,14 @@ const HTML_PAGE = `<!DOCTYPE html>
             });
             const data = await res.json();
             if (data.status === 'ok') {
-                const idx = state.pushupsHistory.findIndex(i => i.id === tempId);
+                const idx = state.pushupsHistory.findIndex(function(i) { return i.id === tempId; });
                 if (idx !== -1) {
                     state.pushupsHistory[idx] = data.item;
                 }
             }
         } catch (e) {
             console.error(e);
-            state.pushupsHistory = state.pushupsHistory.filter(i => i.id !== tempId);
+            state.pushupsHistory = state.pushupsHistory.filter(function(i) { return i.id !== tempId; });
         }
         updateProgressUI();
     }
@@ -915,7 +913,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     async function deleteSet(id) {
         triggerHaptic();
-        state.pushupsHistory = state.pushupsHistory.filter(i => i.id !== id);
+        state.pushupsHistory = state.pushupsHistory.filter(function(i) { return i.id !== id; });
         updateProgressUI();
 
         try {
@@ -981,31 +979,28 @@ const HTML_PAGE = `<!DOCTYPE html>
     function setChartMode(mode) {
         triggerHaptic();
         state.chartMode = mode;
-        document.querySelectorAll('.chart-tab').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.chart-tab').forEach(function(el) { el.classList.remove('active'); });
         document.getElementById('tab-' + mode).classList.add('active');
         renderChartsAndStats();
     }
 
     function renderChartsAndStats() {
-        // 1. Агрегация по днях для расчетов
         const dailyMap = {};
-        state.pushupsHistory.forEach(item => {
+        state.pushupsHistory.forEach(function(item) {
             if (item.created_at) {
                 const dayStr = item.created_at.split('T')[0];
                 dailyMap[dayStr] = (dailyMap[dayStr] || 0) + item.count;
             }
         });
 
-        const allDays = Object.keys(dailyMap).sort();
-        const totalReps = state.pushupsHistory.reduce((a, b) => a + b.count, 0);
+        const totalReps = state.pushupsHistory.reduce(function(a, b) { return a + b.count; }, 0);
         document.getElementById('stat-total-sets').innerText = state.pushupsHistory.length;
         document.getElementById('stat-total-reps').innerText = totalReps;
 
         let maxDay = 0;
-        Object.values(dailyMap).forEach(val => { if (val > maxDay) maxDay = val; });
+        Object.values(dailyMap).forEach(function(val) { if (val > maxDay) maxDay = val; });
         document.getElementById('stat-max-day').innerText = maxDay;
 
-        // Расчет стрика (серии дней подряд с выполненной целью)
         let streak = 0;
         let checkDate = new Date();
         while (true) {
@@ -1015,7 +1010,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                 streak++;
                 checkDate.setDate(checkDate.getDate() - 1);
             } else {
-                // Если сегодня еще не выполнено, проверим вчерашний день, вдруг стрик вчерашний
                 if (streak === 0 && dateStr === new Date().toISOString().split('T')[0]) {
                     checkDate.setDate(checkDate.getDate() - 1);
                     const yesterStr = checkDate.toISOString().split('T')[0];
@@ -1030,12 +1024,10 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
         document.getElementById('stat-streak').innerText = streak + ' дней';
 
-        // Среднее за активные дни
         const activeDaysCount = Object.keys(dailyMap).length;
         const avg = activeDaysCount > 0 ? Math.round(totalReps / activeDaysCount) : 0;
         document.getElementById('stat-avg').innerText = avg;
 
-        // 2. Рендеринг красивого графика
         const chartArea = document.getElementById('chart-bars-area');
         chartArea.innerHTML = '';
 
@@ -1043,7 +1035,6 @@ const HTML_PAGE = `<!DOCTYPE html>
         const now = new Date();
 
         if (state.chartMode === 'daily') {
-            // Последние 7 дней
             for (let i = 6; i >= 0; i--) {
                 const d = new Date(now);
                 d.setDate(d.getDate() - i);
@@ -1052,7 +1043,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                 chartData.push({ label: label, value: dailyMap[dateStr] || 0 });
             }
         } else if (state.chartMode === 'weekly') {
-            // Последние 4 недели
             for (let i = 3; i >= 0; i--) {
                 let weekSum = 0;
                 for (let j = 0; j < 7; j++) {
@@ -1064,12 +1054,11 @@ const HTML_PAGE = `<!DOCTYPE html>
                 chartData.push({ label: (4 - i) + '-я нед.', value: weekSum });
             }
         } else if (state.chartMode === 'monthly') {
-            // Последние 5 месяцев
             for (let i = 4; i >= 0; i--) {
                 const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
                 const mName = d.toLocaleDateString('ru-RU', { month: 'short' });
                 let monthSum = 0;
-                Object.keys(dailyMap).forEach(dateStr => {
+                Object.keys(dailyMap).forEach(function(dateStr) {
                     const itemDate = new Date(dateStr);
                     if (itemDate.getMonth() === d.getMonth() && itemDate.getFullYear() === d.getFullYear()) {
                         monthSum += dailyMap[dateStr];
@@ -1079,9 +1068,9 @@ const HTML_PAGE = `<!DOCTYPE html>
             }
         }
 
-        const maxVal = Math.max(...chartData.map(i => i.value), state.dailyGoal, 10);
+        const maxVal = Math.max.apply(null, chartData.map(function(i) { return i.value; }).concat([state.dailyGoal, 10]));
 
-        chartData.forEach(item => {
+        chartData.forEach(function(item) {
             const heightPct = Math.min(100, Math.round((item.value / maxVal) * 100));
             const isCompleted = item.value >= (state.chartMode === 'daily' ? state.dailyGoal : state.dailyGoal * (state.chartMode === 'weekly' ? 7 : 30));
             
@@ -1089,13 +1078,11 @@ const HTML_PAGE = `<!DOCTYPE html>
             if (isCompleted) barClass += ' filled';
             else if (item.value > 0) barClass += ' active-day';
 
-            chartArea.innerHTML += `
-                <div class="chart-bar-wrap">
-                    <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">${item.value > 0 ? item.value : ''}</div>
-                    <div class="${barClass}" style="height: ${Math.max(8, heightPct)}%;"></div>
-                    <div class="chart-label">${item.label}</div>
-                </div>
-            `;
+            chartArea.innerHTML += '<div class="chart-bar-wrap">' +
+                '<div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">' + (item.value > 0 ? item.value : '') + '</div>' +
+                '<div class="' + barClass + '" style="height: ' + Math.max(8, heightPct) + '%;"></div>' +
+                '<div class="chart-label">' + item.label + '</div>' +
+            '</div>';
         });
     }
 
@@ -1111,7 +1098,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         titleEl.innerText = monthNames[month] + " " + year;
 
         const completedDays = {};
-        state.pushupsHistory.forEach(item => {
+        state.pushupsHistory.forEach(function(item) {
             if (item.created_at) {
                 const dateKey = item.created_at.split('T')[0];
                 completedDays[dateKey] = (completedDays[dateKey] || 0) + item.count;
@@ -1120,7 +1107,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
         gridEl.innerHTML = '';
         const weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-        weekdays.forEach(wd => {
+        weekdays.forEach(function(wd) {
             gridEl.innerHTML += '<div class="calendar-weekday">' + wd + '</div>';
         });
 
