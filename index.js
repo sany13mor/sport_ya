@@ -1,6 +1,7 @@
 try { require('dotenv').config(); } catch (e) {}
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const { Pool } = require('pg');
 const TelegramBot = require('node-telegram-bot-api');
 
@@ -8,20 +9,28 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.static(__dirname));
 
-// Функция отдачи index.html для всех роутов (включая /webapp)
+// Подключение статических папок
+['public', 'src', 'views', ''].forEach(folder => {
+    app.use(express.static(path.join(__dirname, folder)));
+});
+
+// Функция поиска и отдачи index.html
 const serveIndex = (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'), (err) => {
-        if (err) {
-            res.sendFile(path.join(__dirname, 'index.html'), (err2) => {
-                if (err2) {
-                    res.status(404).send('Файл index.html не найден!');
-                }
-            });
+    const possiblePaths = [
+        path.join(__dirname, 'public', 'index.html'),
+        path.join(__dirname, 'index.html'),
+        path.join(__dirname, 'src', 'index.html'),
+        path.join(__dirname, 'views', 'index.html')
+    ];
+
+    for (const filePath of possiblePaths) {
+        if (fs.existsSync(filePath)) {
+            return res.sendFile(filePath);
         }
-    });
+    }
+
+    res.status(404).send('Файл index.html не найден в проекте! Создайте index.html в корне репозитория.');
 };
 
 app.get('/', serveIndex);
@@ -35,7 +44,7 @@ app.listen(PORT, () => {
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
 if (!token) {
-    console.error('❌ ОШИБКА: Переменная TELEGRAM_BOT_TOKEN не задана в Environment на Render!');
+    console.error('❌ ОШИБКА: Переменная TELEGRAM_BOT_TOKEN не задана!');
 } else {
     const bot = new TelegramBot(token, { polling: true });
 
@@ -105,7 +114,7 @@ if (!token) {
                     END IF;
                 END $$;
             `);
-            console.log('✅ Структура БД обновлена и данные успешно восстановлены.');
+            console.log('✅ Структура БД обновлена.');
         } catch (err) {
             console.error('❌ Ошибка инициализации БД:', err);
         }
